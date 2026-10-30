@@ -1,5 +1,4 @@
 const txText = (key, substitutions) => chrome.i18n.getMessage(key, substitutions) || key;
-// 오디오는 메모리에서 처리하여 바로 재생합니다. 녹음·저장·외부 전송은 하지 않습니다.
 const entries = new Map();
 let lastControlsAt = 0;
 let controlsEnabled = false;
@@ -62,7 +61,7 @@ function stopEntry(id) {
     track.stop();
   }
   for (const node of [entry.source, ...entry.filters, entry.gain, entry.splitter, ...entry.analysers]) {
-    try { node.disconnect(); } catch { /* 이미 분리된 노드는 그대로 둡니다. */ }
+    try { node.disconnect(); } catch {}
   }
   void entry.context.close().catch(() => {});
 }
@@ -89,7 +88,6 @@ async function startEntry(id, streamId) {
     high.type = 'highshelf'; high.frequency.value = 8000; high.gain.value = 0;
     const gain = context.createGain(); gain.gain.value = 1;
     source.connect(low).connect(mid).connect(high).connect(gain).connect(context.destination);
-    // 원래 스트림이 정지된 캡처 상태에서도 좌우 역상·음소거와 무관하게 소리 재생을 식별합니다.
     const splitter = context.createChannelSplitter(2);
     source.connect(splitter);
     const analysers = [context.createAnalyser(), context.createAnalyser()];
@@ -152,11 +150,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   return true;
 });
 
-// 서비스 워커 종료·네이티브 앱 오류 등에서 음소거/EQ가 남지 않도록 원음을 복구합니다.
+// Restore audio when control heartbeats stop.
 setInterval(() => {
   if (controlsEnabled && performance.now() - lastControlsAt > 3000) {
     restoreAll();
-    // 서비스 워커가 중단되었더라도 배지가 ON으로 남지 않게 깨웁니다.
     void chrome.runtime.sendMessage({ target: 'worker', type: 'controls-timeout' }).catch(() => {});
   }
 }, 500);

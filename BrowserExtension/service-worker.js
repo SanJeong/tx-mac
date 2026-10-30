@@ -67,7 +67,6 @@ async function loadOwnership() {
 }
 
 async function saveOwnership() {
-  // 종료 후 남은 음소거를 복구하기 위한 세션 정보입니다. 제목·URL은 저장하지 않습니다.
   await chrome.storage.session.set({ tx6OwnedMutes: Object.fromEntries(ownedMutes) });
 }
 
@@ -81,7 +80,7 @@ async function restoreOwnedMute(id) {
   if (!record) return;
   let tab;
   try { tab = await chrome.tabs.get(id); } catch { ownedMutes.delete(id); await saveOwnership(); return; }
-  // 사용자가 Chrome에서 직접 바꾼 값이나 다른 확장의 음소거는 건드리지 않습니다.
+  // Restore only mutes owned by this extension.
   if (mutedByUs(tab)) await chrome.tabs.update(id, { muted: record.original });
   ownedMutes.delete(id);
   await saveOwnership();
@@ -141,7 +140,6 @@ async function publishSnapshot() {
     await loadOwnership();
     const state = await offscreen({ type: 'status' });
     const captured = new Map((state.tabs || []).map((tab) => [tab.id, tab]));
-    // 자동 감지에 필요한 현재 재생 탭과 이전에 감지한 탭만 조회합니다.
     const audible = await chrome.tabs.query({ audible: true });
     for (const tab of audible) if (Number.isInteger(tab.id)) detectedTabs.set(tab.id, tabMetadata(tab, captured.get(tab.id) ?? null));
     const ids = [...new Set([...detectedTabs.keys(), ...captured.keys(), ...ownedMutes.keys()])];
@@ -151,7 +149,6 @@ async function publishSnapshot() {
       if (result.status === 'fulfilled') detectedTabs.set(ids[index], tabMetadata(result.value, captured.get(ids[index]) ?? null));
       else { detectedTabs.delete(ids[index]); ownedMutes.delete(ids[index]); userOverrides.delete(ids[index]); }
     }
-    // 네이티브 메시지 크기를 제한하되 캡처·앱이 음소거한 탭은 먼저 유지합니다.
     const metadata = [...detectedTabs.values()].sort((a, b) =>
       Number(b.captured || ownedMutes.has(b.id)) - Number(a.captured || ownedMutes.has(a.id)) || Number(b.active) - Number(a.active)).slice(0, 200);
     const message = { type: 'tabs', profileSession: await profileSession(), tabs: metadata };
@@ -192,7 +189,6 @@ async function applyUncapturedControls(message, generation) {
       ownedMutes.delete(id); userOverrides.add(id); await saveOwnership(); continue;
     }
     if (tab.mutedInfo?.muted === true) continue;
-    // DOM 문서의 watchdog도 유지하여 서비스 워커 중단 시 복구할 수 있게 합니다.
     await ensureOffscreen();
     if (!appControlsReady() || generation !== controlGeneration) return;
     ownedMutes.set(id, { original: false }); await saveOwnership();
@@ -291,6 +287,5 @@ chrome.tabCapture.onStatusChanged.addListener((info) => {
 chrome.runtime.onInstalled.addListener(() => { reconnectAttempts = 0; connectNative(); });
 chrome.runtime.onStartup.addListener(() => { reconnectAttempts = 0; connectNative(); });
 setInterval(() => { if ((controlsEnabled || ownedMutes.size) && !appControlsReady()) void failOpen(); }, 500);
-// 서비스 워커 재시작 후 남은 이 확장 소유의 음소거만 복구합니다.
 void enqueue(() => restoreAllOwnedMutes());
 connectNative();

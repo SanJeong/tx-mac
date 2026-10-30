@@ -26,7 +26,6 @@ static NSString *const TXControlsNotification=@"local.tx6mac.browser.controls";
         [clean addObject:@{@"id":tab[@"id"],@"session":session,@"title":title,@"host":host,@"active":@(TXBool(tab[@"active"])),@"captured":@(TXBool(tab[@"captured"])),@"muted":@(TXBool(tab[@"muted"])),@"detected":@(TXBool(tab[@"detected"])),@"peak":@(fmaxf(0,fminf(1,peak)))}];
     }
     NSDictionary *old=_sessions[session];_sessions[session]=@{@"tabs":clean,@"time":@(NSDate.date.timeIntervalSince1970)};
-    // 메터 heartbeat만 바뀐 경우 UI 전체를 다시 만들지 않습니다.
     NSMutableArray *oldShape=[NSMutableArray array],*newShape=[NSMutableArray array];
     for(NSDictionary *t in old[@"tabs"]?:@[]){NSMutableDictionary *v=[t mutableCopy];[v removeObjectForKey:@"peak"];[oldShape addObject:v];}
     for(NSDictionary *t in clean){NSMutableDictionary *v=[t mutableCopy];[v removeObjectForKey:@"peak"];[newShape addObject:v];}

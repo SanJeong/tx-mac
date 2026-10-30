@@ -16,16 +16,19 @@ typedef struct {
     float smoothGain[TX_SLOTS], smoothMaster, limiterGain;
     double currentEQ[TX_SLOTS][TX_EQ];
     TXFilter filters[TX_SLOTS][TX_EQ];
-    double sampleRate;
-    UInt32 physicalInputChannels, outputLeft, outputRight;
-    int tapSlots[TX_SLOTS], tapCount;
+    _Atomic(double) sampleRate;
+    _Atomic(UInt32) physicalInputChannels;
+    UInt32 outputLeft, outputRight;
+    int tapSlots[TX_SLOTS];
+    _Atomic(int) tapCount;
 } TXRenderState;
 
 @interface TXAudio : NSObject
 @property(nonatomic,readonly) TXRenderState *state;
 @property(nonatomic,readonly) BOOL running;
-@property(nonatomic,copy) NSString *lastError;
+@property(atomic,copy) NSString *lastError;
 @property(nonatomic,readonly) AudioDeviceID device;
+// HAL lifecycle and discovery are synchronous; call only on the app's serial HAL queue.
 - (BOOL)startOnDevice:(AudioDeviceID)device groups:(NSArray<NSArray<NSNumber*>*>*)groups;
 - (void)stop;
 + (NSArray<NSDictionary*>*)outputs;

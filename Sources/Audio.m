@@ -30,8 +30,6 @@ static UInt32 Channels(AudioObjectID obj,AudioObjectPropertyScope scope) {
     free(list);return total;
 }
 static BOOL IsSystemSoundProcess(NSString *executablePath,NSString *bundleID) {
-    // 이 맥에서 실제 확인한 OS 효과음 전용 서버만 분리합니다.
-    // 알림을 직접 재생하는 일반 앱이나 coreaudiod 전체는 포함하지 않습니다.
     return [executablePath isEqualToString:@"/usr/sbin/systemsoundserverd"] ||
         (!executablePath.length && [bundleID isEqualToString:@"systemsoundserverd"]);
 }
@@ -106,7 +104,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         s->smoothMaster+=smoothing*(master-s->smoothMaster);
         float peak=fmaxf(fabsf(mix[0]),fabsf(mix[1]))*s->smoothMaster;
         float required=peak>0.98f?0.98f/peak:1;
-        // 좌우 채널을 같은 비율로 줄이고, 즉시 어택/80ms 복귀로 포화를 막습니다.
+        // Share limiter gain across both channels to preserve the stereo image.
         if(required<s->limiterGain)s->limiterGain=required;
         else s->limiterGain+=limiterRelease*(required-s->limiterGain);
         if(s->limiterGain<0.999f)atomic_fetch_add_explicit(&s->limitedFrames,1,memory_order_relaxed);
@@ -145,9 +143,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         AudioObjectID obj=n.unsignedIntValue;pid_t pid=(pid_t)ReadUInt(obj,kAudioProcessPropertyPID);if(pid==getpid())continue;
         NSString *bundle=ReadString(obj,kAudioProcessPropertyBundleID);if(bundle.length&&[bundle isEqualToString:NSBundle.mainBundle.bundleIdentifier])continue;NSRunningApplication *app=[NSRunningApplication runningApplicationWithProcessIdentifier:pid];
         NSString *key=app.bundleIdentifier?:bundle;
-        // 브라우저 오디오 도우미를 실제 응용 프로그램으로 묶습니다.
         NSString *path=app.bundleURL.path;
-        // 백그라운드 오디오 도우미는 NSRunningApplication에 등록되지 않을 수 있습니다.
         char executable[PROC_PIDPATHINFO_MAXSIZE]={0};
         if(proc_pidpath(pid,executable,sizeof(executable))>0){NSString *actualPath=[NSString stringWithUTF8String:executable];if(actualPath.length)path=actualPath;}
         NSRange appEnd=path.length?[path rangeOfString:@".app/"]:NSMakeRange(NSNotFound,0);
@@ -168,6 +164,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     self.lastError=[NSString stringWithFormat:TXL(@"%@ 오류: %d (시스템 오디오 접근 권한과 출력 장치를 확인하세요)"),stage,(int)status];[self stop];return NO;
 }
 - (BOOL)startOnDevice:(AudioDeviceID)device groups:(NSArray<NSArray<NSNumber*>*>*)groups {
+    NSAssert(!NSThread.isMainThread,@"HAL startup must not block the main thread");
     [self stop];self.lastError=@"";_device=device;
     if(groups.count!=6)return [self fail:TXL(@"6개 트랙 그룹이 필요합니다") status:-4];
     NSMutableSet *uniqueProcesses=[NSMutableSet set];
@@ -183,7 +180,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     UInt32 stereo[2]={1,2},size=sizeof(stereo);AudioObjectPropertyAddress stereoAddr=Addr(kAudioDevicePropertyPreferredChannelsForStereo,kAudioDevicePropertyScopeOutput);
     if(AudioObjectGetPropertyData(device,&stereoAddr,0,NULL,&size,stereo)==noErr&&stereo[0]&&stereo[1]){_state->outputLeft=stereo[0]-1;_state->outputRight=stereo[1]-1;}
     NSMutableArray *excluded=[NSMutableArray array];
-    // 자체 출력은 전역 탭에서 제외하여 오디오 피드백을 막습니다.
+    // Exclude this process from the global tap to prevent feedback.
     for(NSNumber *n in ReadIDs(kAudioObjectSystemObject,kAudioHardwarePropertyProcessObjectList,kAudioObjectPropertyScopeGlobal))if((pid_t)ReadUInt(n.unsignedIntValue,kAudioProcessPropertyPID)==getpid())[excluded addObject:n];
     for(NSArray *group in groups)[excluded addObjectsFromArray:group];
     NSMutableArray *tapList=[NSMutableArray array];
@@ -194,7 +191,6 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         if(@available(macOS 26.0,*)){
             NSMutableOrderedSet<NSString*> *bundles=[NSMutableOrderedSet orderedSet];
             for(NSNumber *process in ids){NSString *bundle=ReadString(process.unsignedIntValue,kAudioProcessPropertyBundleID);if(bundle.length)[bundles addObject:bundle];}
-            // 첫 오디오 입출력 전에 자신의 프로세스 객체가 없어도 자체 출력을 제외합니다.
             if(slot==6){NSString *ownBundle=NSBundle.mainBundle.bundleIdentifier;if(ownBundle.length)[bundles addObject:ownBundle];else return [self fail:TXL(@"앱 식별자가 없어 피드백 방지를 보장할 수 없습니다") status:-7];}
             desc.bundleIDs=bundles.array;desc.processRestoreEnabled=YES;
         }
@@ -214,7 +210,6 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     NSArray *actualOrder=CFBridgingRelease(activeTapUIDs);NSMutableArray *expectedOrder=[NSMutableArray array];for(NSDictionary *entry in tapList)[expectedOrder addObject:entry[@kAudioSubTapUIDKey]];
     if(status!=noErr||![actualOrder isEqualToArray:expectedOrder])return [self fail:TXL(@"프로그램 오디오 채널 순서 확인") status:status?:-9];
     if(Channels(_aggregate,kAudioDevicePropertyScopeInput)!=_state->physicalInputChannels+2*_state->tapCount)return [self fail:TXL(@"프로그램 오디오 입력 레이아웃 확인") status:-10];
-    // 입출력이 Float32인지 확인하고, 지원하지 않는 형식은 원음을 복구합니다.
     for(NSNumber *stream in [ReadIDs(_aggregate,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeInput) arrayByAddingObjectsFromArray:ReadIDs(_aggregate,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeOutput)]){
         AudioStreamBasicDescription f={0};size=sizeof(f);AudioObjectPropertyAddress a=Addr(kAudioStreamPropertyVirtualFormat,kAudioObjectPropertyScopeGlobal);
         status=AudioObjectGetPropertyData(stream.unsignedIntValue,&a,0,NULL,&size,&f);
@@ -226,7 +221,6 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     atomic_store(&_state->outputPeak,0);_state->smoothMaster=0;_state->limiterGain=1;atomic_store(&_state->limitedFrames,0);
     for(int slot=0;slot<TX_SLOTS;slot++){_state->smoothGain[slot]=0;for(int b=0;b<TX_EQ;b++){memset(&_state->filters[slot][b],0,sizeof(TXFilter));_state->currentEQ[slot][b]=atomic_load(&_state->eq[slot][b]);SetFilter(&_state->filters[slot][b],b,_state->currentEQ[slot][b],rate);}}
     status=AudioDeviceCreateIOProcID(_aggregate,Render,_state,&_proc);if(status!=noErr)return [self fail:TXL(@"오디오 처리 연결") status:status];
-    // IOProc를 등록한 뒤에는 자기 프로세스를 직접 제외할 수 있어야 합니다.
     pid_t ownPID=getpid();AudioObjectID ownObject=0;size=sizeof(ownObject);AudioObjectPropertyAddress ownAddr=Addr(kAudioHardwarePropertyTranslatePIDToProcessObject,kAudioObjectPropertyScopeGlobal);
     status=AudioObjectGetPropertyData(kAudioObjectSystemObject,&ownAddr,sizeof(ownPID),&ownPID,&size,&ownObject);
     if(status==noErr&&ownObject){
@@ -237,11 +231,11 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
             if(status!=noErr)return [self fail:TXL(@"자체 출력 피드백 방지 설정") status:status];
         }
     }else if(@available(macOS 26.0,*)){
-        // 이 경우 명시적으로 제외한 자신의 bundle ID가 피드백을 막습니다.
     }else return [self fail:TXL(@"자체 오디오 프로세스 확인") status:status?:-11];
     status=AudioDeviceStart(_aggregate,_proc);if(status!=noErr)return [self fail:TXL(@"오디오 시작") status:status];_running=YES;return YES;
 }
 - (void)stop {
+    NSAssert(!NSThread.isMainThread||(!_aggregate&&!_taps.count),@"HAL shutdown must not block the main thread");
     if(_aggregate&&_proc){AudioDeviceStop(_aggregate,_proc);AudioDeviceDestroyIOProcID(_aggregate,_proc);}_proc=NULL;
     if(_aggregate)AudioHardwareDestroyAggregateDevice(_aggregate);_aggregate=0;
     for(NSNumber *n in _taps)AudioHardwareDestroyProcessTap(n.unsignedIntValue);[_taps removeAllObjects];_globalDescription=nil;_globalTap=0;_running=NO;
@@ -261,13 +255,11 @@ BOOL TXRunSelfCheck(void) {
         for(int i=0;i<48000;i++){float x=0.1*sin(2*M_PI*1000*i/48000),y=FilterSample(&f,0,x);if(!isfinite(y)||fabs(y)>10)return NO;energy+=y*y;if(gain==0&&fabs(y-x)>0.000001)return NO;}
         if(energy<=0)return NO;
     }
-    // 저음/중음/고음의 실제 부스트·컷 응답을 확인합니다.
     for(int band=0;band<3;band++)for(int polarity=-1;polarity<=1;polarity+=2){
         TXFilter f={0};SetFilter(&f,band,polarity*18,48000);double frequency=band==0?25:(band==1?1000:16000),inEnergy=0,outEnergy=0;
         for(int i=0;i<48000;i++){float x=0.01*sin(2*M_PI*frequency*i/48000),y=FilterSample(&f,0,x);if(i>24000){inEnergy+=x*x;outEnergy+=y*y;}}
         double ratio=sqrt(outEnergy/inEnergy);if(polarity==1?ratio<6:ratio>0.17)return NO;
     }
-    // 실제 렌더 콜백으로 스테레오/다채널, 채널 분리, 음소거, 레이아웃 실패를 검사합니다.
     TXRenderState s={0};s.sampleRate=48000;s.tapCount=2;s.tapSlots[0]=0;s.tapSlots[1]=6;s.outputLeft=0;s.outputRight=1;
     s.smoothMaster=1;s.limiterGain=1;atomic_store(&s.master,1);
     for(int slot=0;slot<TX_SLOTS;slot++){s.smoothGain[slot]=1;atomic_store(&s.gain[slot],1);for(int b=0;b<3;b++)SetFilter(&s.filters[slot][b],b,0,48000);}
@@ -285,23 +277,19 @@ BOOL TXRunSelfCheck(void) {
     atomic_store(&s.masterMuted,false);s.smoothMaster=1;
     input.count=1;Render(0,NULL,(AudioBufferList*)&input,NULL,(AudioBufferList*)&output,NULL,&s);
     if(atomic_load(&s.layoutFault)!=1||out[0]!=0)return NO;
-    // 비인터리브 탭과 물리 입력을 구분하고 좌우 채널 위치를 검증합니다.
     float mic[64],left[64],right[64];for(int i=0;i<64;i++){mic[i]=0.9;left[i]=0.15;right[i]=-0.25;}
     struct{UInt32 count;AudioBuffer buf[3];} planar={3,{{1,sizeof(mic),mic},{1,sizeof(left),left},{1,sizeof(right),right}}};
     s.physicalInputChannels=1;s.tapCount=1;s.tapSlots[0]=6;atomic_store(&s.layoutFault,0);
     Render(0,NULL,(AudioBufferList*)&planar,NULL,(AudioBufferList*)&output,NULL,&s);
     if(atomic_load(&s.layoutFault)||fabs(out[0]-0.15)>0.00001||fabs(out[1]+0.25)>0.00001)return NO;
-    // 앞선 NULL 입력 버퍼를 다음 버퍼로 오인해 포인터가 언더플로하지 않아야 합니다.
     planar.buf[1].mData=NULL;atomic_store(&s.layoutFault,0);
     Render(0,NULL,(AudioBufferList*)&planar,NULL,(AudioBufferList*)&output,NULL,&s);
     if(atomic_load(&s.layoutFault)!=3||out[0]!=0)return NO;
     planar.buf[1].mData=left;atomic_store(&s.layoutFault,0);
-    // EQ 최대 부스트 상황의 큰 입력도 좌우 비율을 유지하며 제한되어야 합니다.
     for(int i=0;i<64;i++){left[i]=8;right[i]=-4;}
     s.limiterGain=1;Render(0,NULL,(AudioBufferList*)&planar,NULL,(AudioBufferList*)&output,NULL,&s);
     for(int i=0;i<64;i++){if(fabs(out[i*8])>0.980001||fabs(out[i*8+1])>0.980001||fabs(out[i*8]+2*out[i*8+1])>0.00001)return NO;}
     if(!atomic_load(&s.limitedFrames))return NO;
-    // 오염된 입력은 출력과 필터 상태로 전파하지 않습니다.
     left[0]=NAN;right[0]=INFINITY;
     Render(0,NULL,(AudioBufferList*)&planar,NULL,(AudioBufferList*)&output,NULL,&s);
     for(int i=0;i<512;i++)if(!isfinite(out[i]))return NO;

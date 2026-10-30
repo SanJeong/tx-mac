@@ -35,7 +35,7 @@
 @end
 
 int main(int argc,const char *argv[]) {@autoreleasepool {
-    // Chrome의 허용된 확장 원본만 로컬 브리지에 연결합니다.
+    // Accept only the installed extension origin.
     if(argc<2||![[NSString stringWithUTF8String:argv[1]] isEqual:TX_EXTENSION_ORIGIN])return 1;
     signal(SIGPIPE,SIG_IGN);TXNativeHost *host=[TXNativeHost new];host.session=NSUUID.UUID.UUIDString;host.outputLock=[NSLock new];
     [[NSDistributedNotificationCenter defaultCenter] addObserver:host selector:@selector(controls:) name:@"local.tx6mac.browser.controls" object:nil suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
