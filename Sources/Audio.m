@@ -112,7 +112,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         if(s->limiterGain<0.999f)atomic_fetch_add_explicit(&s->limitedFrames,1,memory_order_relaxed);
         for(int c=0;c<2;c++){float value=fmaxf(-0.98f,fminf(0.98f,mix[c]*s->smoothMaster*s->limiterGain));out[c][f*os[c]]=value;outputPeak=fmaxf(outputPeak,fabsf(value));}
     }
-    for(int t=0;t<s->tapCount;t++){int slot=s->tapSlots[t];atomic_store(&s->peak[slot],peaks[slot]);}atomic_store(&s->outputPeak,outputPeak);
+    for(int slot=0;slot<TX_SLOTS;slot++)atomic_store(&s->peak[slot],peaks[slot]);atomic_store(&s->outputPeak,outputPeak);
     atomic_fetch_add(&s->callbacks,1);atomic_fetch_add(&s->frames,frames);return noErr;
 }
 
@@ -245,6 +245,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     if(_aggregate&&_proc){AudioDeviceStop(_aggregate,_proc);AudioDeviceDestroyIOProcID(_aggregate,_proc);}_proc=NULL;
     if(_aggregate)AudioHardwareDestroyAggregateDevice(_aggregate);_aggregate=0;
     for(NSNumber *n in _taps)AudioHardwareDestroyProcessTap(n.unsignedIntValue);[_taps removeAllObjects];_globalDescription=nil;_globalTap=0;_running=NO;
+    for(int slot=0;slot<TX_SLOTS;slot++)atomic_store(&_state->peak[slot],0);atomic_store(&_state->outputPeak,0);
 }
 - (void)dealloc{[self stop];free(_state);}
 @end
