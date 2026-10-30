@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "TX · MAC — Tab Mixer",
+  "description": "소리 나는 Chrome 탭을 자동 감지하고 음소거합니다. 탭별 음량·EQ는 확장 아이콘 또는 Command+Shift+6으로 연결하세요.",
+  "version": "0.2.0",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "tabs",
+    "nativeMessaging",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "이 탭을 TX · MAC 믹서에 연결 / 연결 해제"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyffWjtASyt/71fzAQqqVY4qutJJ9tvyImt+q4YeXoic7YeSt8PG09D3iUCk4fGIdR1DSGeWEiryx1vEze+ERPxVKZ9MBfHZI8DOZLZRweO96qXkNgdmCmdW8ImhWq2CGbjtLR4UcngRMSbofmqDrafiMfrSWtmQ1h/CrY4s5oS/vXIPf7Fgh+uHh2+Ld860ZaGh4Xx/MWAfOEWxbYYMdCnF6exen0HdaNpkJJ7g3il6ndGx0MFlrW08pBFhrGGzgvVlBHbmkHy2kDIvY69DTWy3V4KC2JZXxL7SfXf0eESuW4Gta65SQAcdHbOzqEfZ0oWTVibtJ5AkNUDIZyBy5QQIDAQAB",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'none'; media-src 'self' blob:;"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+6",
+        "mac": "Command+Shift+6"
+      }
+    }
+  }
+}
