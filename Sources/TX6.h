@@ -39,6 +39,7 @@ typedef struct {
 @property(nonatomic,copy) void (^received)(NSString *source, UInt8 channel, UInt8 cc, UInt8 value);
 @property(nonatomic,copy) void (^changed)(void);
 @property(nonatomic,readonly) NSArray<NSString*> *sources;
+@property(nonatomic,readonly) NSDictionary *diagnostics;
 @property(nonatomic,copy) NSString *transport;
 - (void)start;
 - (void)refresh;

@@ -1,5 +1,6 @@
 #import "TX6.h"
 #import "BrowserBridge.h"
+#import "Localization.h"
 #import <CoreAudioKit/CoreAudioKit.h>
 #import <math.h>
 
@@ -24,7 +25,8 @@ static NSTextField *Label(NSString *s,NSRect frame,CGFloat size,BOOL mono) {
     [face setFill];[[NSBezierPath bezierPathWithRoundedRect:r xRadius:2 yRadius:2] fill];
     [Color(self.lightKey||on||self.bezelColor||pressed?0x252625:0xF1F2E9) setFill];
     NSColor *ink=Color(self.lightKey||on||self.bezelColor||pressed?0x252625:0xF1F2E9);CGFloat h=[self.title containsString:@"\n"]?28:17;
-    Text(self.title,NSMakeRect(5,NSMidY(r)-h/2,r.size.width-10,h),[self.title containsString:@"\n"]?Mono(9,NSFontWeightSemibold):self.font,ink,NSTextAlignmentCenter);
+    NSFont *titleFont=[self.title containsString:@"\n"]?Mono(9,NSFontWeightSemibold):self.font;while(titleFont.pointSize>8&&[self.title sizeWithAttributes:@{NSFontAttributeName:titleFont}].width>r.size.width-10)titleFont=[NSFont systemFontOfSize:titleFont.pointSize-0.5 weight:NSFontWeightMedium];
+    Text(self.title,NSMakeRect(5,NSMidY(r)-h/2,r.size.width-10,h),titleFont,ink,NSTextAlignmentCenter);
     if(self.focusRingType!=NSFocusRingTypeNone&&self.window.firstResponder==self){[Color(0x608CA6) setStroke];NSFrameRect(NSInsetRect(self.bounds,0.5,0.5));}
 }
 @end
@@ -75,18 +77,18 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
 @end
 @implementation TXKnob
 - (BOOL)isFlipped{return YES;}
-- (BOOL)acceptsFirstResponder{return YES;}
+- (BOOL)acceptsFirstResponder{return self.enabled;}
 - (BOOL)isAccessibilityElement{return YES;}
 - (NSString*)accessibilityRole{return NSAccessibilitySliderRole;}
 - (id)accessibilityValue{return @(self.value);}
 - (NSString*)accessibilityValueDescription{return [NSString stringWithFormat:@"%+.1f dB",self.value];}
-- (void)setAccessibilityValue:(id)value{self.value=[value doubleValue];[self sendAction:self.action to:self.target];}
+- (void)setAccessibilityValue:(id)value{if(!self.enabled)return;self.value=[value doubleValue];[self sendAction:self.action to:self.target];}
 - (id)accessibilityMinValue{return @(-18);}
 - (id)accessibilityMaxValue{return @18;}
-- (BOOL)accessibilityPerformIncrement{self.value+=0.5;[self sendAction:self.action to:self.target];return YES;}
-- (BOOL)accessibilityPerformDecrement{self.value-=0.5;[self sendAction:self.action to:self.target];return YES;}
+- (BOOL)accessibilityPerformIncrement{if(!self.enabled)return NO;self.value+=0.5;[self sendAction:self.action to:self.target];return YES;}
+- (BOOL)accessibilityPerformDecrement{if(!self.enabled)return NO;self.value-=0.5;[self sendAction:self.action to:self.target];return YES;}
 
-- (void)setValue:(double)value{_value=fmax(-18,fmin(18,value));self.needsDisplay=YES;NSAccessibilityPostNotification(self,NSAccessibilityValueChangedNotification);}
+- (void)setValue:(double)value{double next=isfinite(value)?fmax(-18,fmin(18,value)):0;if(_value==next)return;_value=next;self.needsDisplay=YES;NSAccessibilityPostNotification(self,NSAccessibilityValueChangedNotification);}
 - (void)drawRect:(NSRect)dirty {
     NSPoint center=NSMakePoint(NSMidX(self.bounds),43);CGFloat r=23;
     Text(self.caption?:@"",NSMakeRect(0,0,self.bounds.size.width,16),Mono(9,NSFontWeightSemibold),Color(0x555953),NSTextAlignmentCenter);
@@ -100,12 +102,13 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
     if(self.awaitingPickup){[Color(0xF36B2F) setFill];[[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(self.bounds.size.width-12,3,5,5)] fill];}
 }
 - (void)mouseDown:(NSEvent*)event {
+    if(!self.enabled)return;
     if(event.clickCount==2){self.value=0;[self sendAction:self.action to:self.target];return;}
     NSPoint start=[self convertPoint:event.locationInWindow fromView:nil];double initial=self.value;
     while(YES){NSEvent *e=[self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp];if(e.type==NSEventTypeLeftMouseUp)break;NSPoint p=[self convertPoint:e.locationInWindow fromView:nil];self.value=initial+(start.y-p.y)*((e.modifierFlags&NSEventModifierFlagShift)?0.025:0.12);[self sendAction:self.action to:self.target];}
 }
-- (void)scrollWheel:(NSEvent*)event{self.value+=event.scrollingDeltaY*(event.hasPreciseScrollingDeltas?0.05:0.5);[self sendAction:self.action to:self.target];}
-- (void)keyDown:(NSEvent*)event{if(event.keyCode==126||event.keyCode==124)self.value+=0.5;else if(event.keyCode==125||event.keyCode==123)self.value-=0.5;else{[super keyDown:event];return;}[self sendAction:self.action to:self.target];}
+- (void)scrollWheel:(NSEvent*)event{if(!self.enabled)return;self.value+=event.scrollingDeltaY*(event.hasPreciseScrollingDeltas?0.05:0.5);[self sendAction:self.action to:self.target];}
+- (void)keyDown:(NSEvent*)event{if(!self.enabled)return;if(event.keyCode==126||event.keyCode==124)self.value+=0.5;else if(event.keyCode==125||event.keyCode==123)self.value-=0.5;else{[super keyDown:event];return;}[self sendAction:self.action to:self.target];}
 @end
 
 @interface TXFader:NSControl
@@ -115,18 +118,18 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
 @end
 @implementation TXFader
 - (BOOL)isFlipped{return YES;}
-- (BOOL)acceptsFirstResponder{return YES;}
+- (BOOL)acceptsFirstResponder{return self.enabled;}
 - (BOOL)isAccessibilityElement{return YES;}
 - (NSString*)accessibilityRole{return NSAccessibilitySliderRole;}
 - (id)accessibilityValue{return @(self.value);}
 - (NSString*)accessibilityValueDescription{return [NSString stringWithFormat:@"%.0f%%",self.value*100];}
-- (void)setAccessibilityValue:(id)value{self.value=[value doubleValue];[self sendAction:self.action to:self.target];}
+- (void)setAccessibilityValue:(id)value{if(!self.enabled)return;self.value=[value doubleValue];[self sendAction:self.action to:self.target];}
 - (id)accessibilityMinValue{return @0;}
 - (id)accessibilityMaxValue{return @1;}
-- (BOOL)accessibilityPerformIncrement{self.value+=0.01;[self sendAction:self.action to:self.target];return YES;}
-- (BOOL)accessibilityPerformDecrement{self.value-=0.01;[self sendAction:self.action to:self.target];return YES;}
+- (BOOL)accessibilityPerformIncrement{if(!self.enabled)return NO;self.value+=0.01;[self sendAction:self.action to:self.target];return YES;}
+- (BOOL)accessibilityPerformDecrement{if(!self.enabled)return NO;self.value-=0.01;[self sendAction:self.action to:self.target];return YES;}
 
-- (void)setValue:(double)value{_value=fmax(0,fmin(1,value));self.needsDisplay=YES;NSAccessibilityPostNotification(self,NSAccessibilityValueChangedNotification);}
+- (void)setValue:(double)value{double next=isfinite(value)?fmax(0,fmin(1,value)):0;if(_value==next)return;_value=next;self.needsDisplay=YES;NSAccessibilityPostNotification(self,NSAccessibilityValueChangedNotification);}
 - (void)drawRect:(NSRect)dirty {
     if(self.rotary){NSPoint center=NSMakePoint(NSMidX(self.bounds),63);CGFloat r=46;[Color(0xECECE7) setFill];NSBezierPath *cap=[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(center.x-r,center.y-r,r*2,r*2)];[cap fill];[Color(0x747C6B) setStroke];cap.lineWidth=1.2;[cap stroke];
         NSBezierPath *ring=[NSBezierPath bezierPath];ring.lineWidth=3;[ring appendBezierPathWithArcWithCenter:center radius:r+6 startAngle:135 endAngle:405 clockwise:NO];[Color(0xA5AE9B) setStroke];[ring stroke];
@@ -139,9 +142,9 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
     Text([NSString stringWithFormat:@"%.0f%%",self.value*100],NSMakeRect(0,self.bounds.size.height-18,self.bounds.size.width,16),Mono(11,NSFontWeightSemibold),Color(0x252625),NSTextAlignmentCenter);
 }
 - (void)updateFromEvent:(NSEvent*)event{NSPoint p=[self convertPoint:event.locationInWindow fromView:nil];self.value=1-(p.y-17)/(self.bounds.size.height-50);[self sendAction:self.action to:self.target];}
-- (void)mouseDown:(NSEvent*)event{if(self.rotary){NSPoint start=[self convertPoint:event.locationInWindow fromView:nil];double initial=self.value;while(YES){NSEvent *e=[self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp];if(e.type==NSEventTypeLeftMouseUp)break;NSPoint p=[self convertPoint:e.locationInWindow fromView:nil];self.value=initial+(start.y-p.y)*0.004;[self sendAction:self.action to:self.target];}return;}[self updateFromEvent:event];while(YES){NSEvent *e=[self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp];if(e.type==NSEventTypeLeftMouseUp)break;[self updateFromEvent:e];}}
-- (void)scrollWheel:(NSEvent*)event{self.value+=event.scrollingDeltaY*(event.hasPreciseScrollingDeltas?0.001:0.02);[self sendAction:self.action to:self.target];}
-- (void)keyDown:(NSEvent*)event{if(event.keyCode==126||event.keyCode==124)self.value+=0.01;else if(event.keyCode==125||event.keyCode==123)self.value-=0.01;else{[super keyDown:event];return;}[self sendAction:self.action to:self.target];}
+- (void)mouseDown:(NSEvent*)event{if(!self.enabled)return;if(self.rotary){NSPoint start=[self convertPoint:event.locationInWindow fromView:nil];double initial=self.value;while(YES){NSEvent *e=[self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp];if(e.type==NSEventTypeLeftMouseUp)break;NSPoint p=[self convertPoint:e.locationInWindow fromView:nil];self.value=initial+(start.y-p.y)*0.004;[self sendAction:self.action to:self.target];}return;}[self updateFromEvent:event];while(YES){NSEvent *e=[self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp];if(e.type==NSEventTypeLeftMouseUp)break;[self updateFromEvent:e];}}
+- (void)scrollWheel:(NSEvent*)event{if(!self.enabled)return;self.value+=event.scrollingDeltaY*(event.hasPreciseScrollingDeltas?0.001:0.02);[self sendAction:self.action to:self.target];}
+- (void)keyDown:(NSEvent*)event{if(!self.enabled)return;if(event.keyCode==126||event.keyCode==124)self.value+=0.01;else if(event.keyCode==125||event.keyCode==123)self.value-=0.01;else{[super keyDown:event];return;}[self sendAction:self.action to:self.target];}
 @end
 
 @interface TXChannel:NSView
@@ -163,38 +166,35 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
 }
 @end
 
-// 앱이 다른 물리 트랙으로 이동해도 음량·EQ·음소거는 해당 앱을 따라갑니다.
-static NSDictionary<NSString*,NSDictionary*> *TXSnapshotAssignments(NSArray<NSString*> *assignments,TXRenderState *state) {
-    NSMutableDictionary *snapshots=[NSMutableDictionary dictionary];
-    for(NSUInteger i=0;i<MIN(assignments.count,6);i++){NSString *key=assignments[i];if(!key.length)continue;snapshots[key]=@{@"gain":@(atomic_load(&state->gain[i])),@"muted":@(atomic_load(&state->muted[i])),@"eq":@[@(atomic_load(&state->eq[i][0])),@(atomic_load(&state->eq[i][1])),@(atomic_load(&state->eq[i][2]))]};}
-    return snapshots;
+// 소스 배정만 갱신합니다. 음량·EQ·음소거는 물리 채널에 고정합니다.
+static NSArray<NSString*> *TXStableAssignments(NSArray<NSString*> *assignments,NSSet<NSString*> *present,NSArray<NSString*> *candidates,BOOL fillEmpty) {
+    NSMutableArray *next=[assignments mutableCopy];
+    BOOL hasBrowserTabs=NO;for(NSString *key in present)if([key hasPrefix:@"chrome-tab:"]){hasBrowserTabs=YES;break;}
+    for(int i=1;i<6;i++)if([next[i] isEqual:@"com.google.Chrome"]){for(NSString *key in candidates)if([key hasPrefix:@"chrome-tab:"]&&![next containsObject:key]){next[i]=key;break;}if(hasBrowserTabs&&[next[i] isEqual:@"com.google.Chrome"])next[i]=@"";}
+    for(int i=1;i<6;i++)if([next[i] length]&&![present containsObject:next[i]])next[i]=@"";
+    if(!fillEmpty)return next;
+    for(NSString *key in candidates){if([next containsObject:key])continue;for(int i=1;i<6;i++)if(![next[i] length]){next[i]=key;break;}}
+    return next;
 }
-static void TXApplyAssignmentSnapshots(NSArray<NSString*> *assignments,NSDictionary<NSString*,NSDictionary*> *snapshots,TXRenderState *state) {
-    for(NSUInteger i=0;i<MIN(assignments.count,6);i++){
-        NSDictionary *saved=snapshots[assignments[i]];atomic_store(&state->gain[i],saved?[saved[@"gain"] floatValue]:1);atomic_store(&state->muted[i],saved?[saved[@"muted"] boolValue]:false);
-        for(int b=0;b<3;b++)atomic_store(&state->eq[i][b],saved?[saved[@"eq"][b] floatValue]:0);atomic_store(&state->peak[i],0);
-    }
-}
-static NSArray<NSString*> *TXOrderedAssignments(NSArray<NSString*> *assignments,NSSet<NSString*> *active,NSDictionary<NSString*,NSDate*> *lastActive,NSSet<NSString*> *observedActive,NSDate *now) {
-    NSArray *tail=[assignments subarrayWithRange:NSMakeRange(1,5)];
-    NSInteger (^priority)(NSString*)=^NSInteger(NSString *key){if(!key.length)return 2;BOOL recent=[observedActive containsObject:key]&&lastActive[key]&&[now timeIntervalSinceDate:lastActive[key]]<3;return [active containsObject:key]||recent?0:1;};
-    NSArray *ordered=[tail sortedArrayWithOptions:NSSortStable usingComparator:^NSComparisonResult(NSString *a,NSString *b){NSInteger pa=priority(a),pb=priority(b);return pa<pb?NSOrderedAscending:(pa>pb?NSOrderedDescending:NSOrderedSame);}];
-    NSMutableArray *result=[NSMutableArray arrayWithObject:@"local.tx6mac.system-sounds"];[result addObjectsFromArray:ordered];return result;
-}
+static BOOL TXMayAutoStart(BOOL enabled,BOOL setupSeen,BOOL explicitlyStopped,BOOL sleeping) {return enabled&&setupSeen&&!explicitlyStopped&&!sleeping;}
+static NSTimeInterval TXRetryDelay(NSUInteger attempt) {return attempt<3?((NSTimeInterval[]){3,10,30})[attempt]:0;}
 static BOOL TXRunUIModelSelfCheck(void) {
-    NSArray *before=@[@"local.tx6mac.system-sounds",@"Claude",@"Xcode",@"Youna",@"",@""];TXRenderState state={0};
-    for(int i=0;i<6;i++)atomic_store(&state.gain[i],1);atomic_store(&state.gain[0],0.25);atomic_store(&state.gain[3],0.42);atomic_store(&state.muted[3],true);atomic_store(&state.eq[3][0],-3);atomic_store(&state.eq[3][1],5);atomic_store(&state.eq[3][2],2);
-    NSDictionary *snapshots=TXSnapshotAssignments(before,&state);NSDate *now=[NSDate dateWithTimeIntervalSince1970:100];NSSet *active=[NSSet setWithObject:@"Youna"];
-    NSArray *ordered=TXOrderedAssignments(before,active,@{},[NSSet set],now);
-    if(![ordered isEqual:@[@"local.tx6mac.system-sounds",@"Youna",@"Claude",@"Xcode",@"",@""]])return NO;
-    TXApplyAssignmentSnapshots(ordered,snapshots,&state);
-    if(fabs(atomic_load(&state.gain[1])-0.42)>0.000001||!atomic_load(&state.muted[1])||atomic_load(&state.eq[1][0])!=-3||atomic_load(&state.eq[1][1])!=5||atomic_load(&state.eq[1][2])!=2||atomic_load(&state.gain[0])!=0.25)return NO;
-    atomic_store(&state.gain[4],0.1);atomic_store(&state.muted[4],true);atomic_store(&state.eq[4][2],18);NSMutableArray *withNew=[ordered mutableCopy];withNew[4]=@"New App";TXApplyAssignmentSnapshots(withNew,snapshots,&state);
-    if(atomic_load(&state.gain[4])!=1||atomic_load(&state.muted[4])||atomic_load(&state.eq[4][2])!=0)return NO;
-    NSArray *held=TXOrderedAssignments(before,active,@{@"Claude":[now dateByAddingTimeInterval:-2]},[NSSet setWithObject:@"Claude"],now);
-    if(![held[1] isEqual:@"Claude"]||![held[2] isEqual:@"Youna"])return NO;
-    NSArray *expired=TXOrderedAssignments(before,active,@{@"Claude":[now dateByAddingTimeInterval:-4]},[NSSet setWithObject:@"Claude"],now);
-    return [expired isEqual:ordered];
+    NSArray *before=@[@"local.tx6mac.system-sounds",@"Claude",@"Xcode",@"Youna",@"",@""];NSSet *present=[NSSet setWithArray:before];
+    if(![TXStableAssignments(before,present,@[@"Youna"],YES) isEqual:before])return NO;
+    NSArray *newApp=TXStableAssignments(before,[present setByAddingObject:@"New"],@[@"New",@"Youna"],YES);
+    if(![newApp isEqual:@[@"local.tx6mac.system-sounds",@"Claude",@"Xcode",@"Youna",@"New",@""]])return NO;
+    NSMutableSet *closed=[present mutableCopy];[closed removeObject:@"Xcode"];
+    if(![TXStableAssignments(before,closed,@[],YES) isEqual:@[@"local.tx6mac.system-sounds",@"Claude",@"",@"Youna",@"",@""]])return NO;
+    NSArray *full=@[@"local.tx6mac.system-sounds",@"A",@"B",@"C",@"D",@"E"];
+    if(![TXStableAssignments(full,[NSSet setWithArray:full],@[@"New"],YES) isEqual:full])return NO;
+    TXRenderState state={0};atomic_store(&state.gain[1],0.42);atomic_store(&state.muted[1],true);atomic_store(&state.eq[1][0],-3);
+    NSArray *chrome=@[@"local.tx6mac.system-sounds",@"com.google.Chrome",@"Other",@"",@"",@""];NSSet *tabs=[NSSet setWithArray:@[@"Other",@"chrome-tab:A",@"chrome-tab:B"]];
+    NSArray *converted=TXStableAssignments(chrome,tabs,@[@"chrome-tab:A",@"chrome-tab:B"],YES);
+    if(![converted isEqual:@[@"local.tx6mac.system-sounds",@"chrome-tab:A",@"Other",@"chrome-tab:B",@"",@""]])return NO;
+    if(![TXStableAssignments(converted,tabs,@[],YES) isEqual:converted]||fabs(atomic_load(&state.gain[1])-0.42)>0.000001||!atomic_load(&state.muted[1])||atomic_load(&state.eq[1][0])!=-3)return NO;
+    NSArray *duplicate=@[@"local.tx6mac.system-sounds",@"chrome-tab:A",@"Other",@"",@"com.google.Chrome",@""];
+    if(![TXStableAssignments(duplicate,[NSSet setWithArray:duplicate],@[@"chrome-tab:A"],YES) isEqual:@[@"local.tx6mac.system-sounds",@"chrome-tab:A",@"Other",@"",@"",@""]])return NO;
+    return TXMayAutoStart(YES,YES,NO,NO)&&!TXMayAutoStart(YES,NO,NO,NO)&&!TXMayAutoStart(YES,YES,YES,NO)&&!TXMayAutoStart(YES,YES,NO,YES)&&!TXMayAutoStart(NO,YES,NO,NO)&&TXRetryDelay(0)==3&&TXRetryDelay(1)==10&&TXRetryDelay(2)==30&&TXRetryDelay(3)==0;
 }
 
 // TX-6는 홈과 메뉴에서 같은 CC31을 보내므로, 확인된 홈 화면에서만 조절을 허용합니다.
@@ -255,97 +255,113 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 @implementation TXApp {
     TXAudio *_audio;TXMIDI *_midi;TXBrowserBridge *_browser;NSDate *_lastBrowserSend;NSTextField *_browserLabel;NSWindow *_window;TXCanvas *_canvas;NSStatusItem *_statusItem;
     NSMenu *_statusMenu;CABTLEMIDIWindowController *_bluetooth;
-    NSPopUpButton *_outputMenu,*_transportMenu;NSButton *_startButton,*_pickupButton,*_invertButton,*_masterMute,*_soundKey,*_autoButton,*_hudButton;TXHUDPanel *_hud;TXHUDView *_hudView;NSTimer *_hudDismiss;NSDictionary *_pendingHUD;BOOL _hudEnabled,_statusMenuTracking;NSPopover *_settingsPopover;TXDeviceContext _deviceContext;NSTextField *_deviceContextLabel,*_calibrationInput;NSButton *_resumeDeviceButton;
+    NSPopUpButton *_outputMenu,*_transportMenu,*_languageMenu;NSWindow *_setupWindow;NSTextField *_setupDevice,*_setupAudio;NSButton *_setupStart;BOOL _sleepResume,_sleeping,_autoStart,_explicitStop,_retryExhausted,_audioStartConsent;NSUInteger _retryAttempt;NSDate *_retryAt,*_lastStatusWrite;NSButton *_autoStartButton;NSButton *_startButton,*_pickupButton,*_invertButton,*_masterMute,*_soundKey,*_autoButton,*_hudButton;TXHUDPanel *_hud;TXHUDView *_hudView;NSTimer *_hudDismiss;NSDictionary *_pendingHUD;BOOL _hudEnabled,_statusMenuTracking;NSPopover *_settingsPopover;TXDeviceContext _deviceContext;NSTextField *_deviceContextLabel,*_calibrationInput;NSButton *_resumeDeviceButton;
     TXFader *_masterFader;NSArray<TXChannel*> *_channels;NSTextField *_remainderLabel;
     NSArray<NSDictionary*> *_outputs,*_processes;NSMutableArray<NSString*> *_assignments;NSString *_outputUID,*_signature,*_statusFile,*_lastMIDI;
-    NSTimer *_poll,*_meter;BOOL _desiredRunning,_isBuilding,_pickup,_invert,_autoAssign;NSInteger _overflowCount;NSMutableDictionary<NSString*,NSDate*> *_lastActive;NSMutableSet<NSString*> *_observedActive;NSString *_outputMenuSignature,*_processMenuSignature;NSDate *_startedAt,*_progressAt;uint64_t _progressFrames;BOOL _latched[6][4];double _previous[6][4];BOOL _havePrevious[6][4];
+    NSTimer *_poll,*_meter;BOOL _desiredRunning,_isBuilding,_pickup,_invert,_autoAssign;NSInteger _overflowCount;NSString *_outputMenuSignature,*_processMenuSignature;NSDate *_startedAt,*_progressAt;uint64_t _progressFrames;BOOL _latched[6][4];double _previous[6][4];BOOL _havePrevious[6][4];
     NSMenuItem *_masterMenuLabel;NSSlider *_menuMaster;NSMutableArray<NSMenuItem*> *_muteItems;NSDate *_lastSave,*_lastLimitDate;uint64_t _lastLimitedFrames;
 }
 - (void)applicationDidFinishLaunching:(NSNotification*)note {
-    _audio=[TXAudio new];_midi=[TXMIDI new];_browser=[TXBrowserBridge new];_lastActive=[NSMutableDictionary dictionary];_observedActive=[NSMutableSet set];_assignments=[NSMutableArray array];_outputs=@[];_processes=@[];_lastMIDI=@"아직 조작 신호가 없습니다";_deviceContext.suspended=YES;
+    _audio=[TXAudio new];_midi=[TXMIDI new];_browser=[TXBrowserBridge new];_assignments=[NSMutableArray array];_outputs=@[];_processes=@[];_lastMIDI=TXL(@"아직 조작 신호가 없습니다");_deviceContext.suspended=YES;
     NSArray *args=NSProcessInfo.processInfo.arguments;NSUInteger index=[args indexOfObject:@"--status-file"];if(index!=NSNotFound&&index+1<args.count)_statusFile=args[index+1];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(languageDidChange:) name:TXLanguageDidChangeNotification object:nil];
+    [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self selector:@selector(willSleep:) name:NSWorkspaceWillSleepNotification object:nil];
+    [[[NSWorkspace sharedWorkspace] notificationCenter] addObserver:self selector:@selector(didWake:) name:NSWorkspaceDidWakeNotification object:nil];
     [self loadSettings];[self buildWindow];[self buildStatusItem];[self refreshDevices];
-    __weak TXApp *weakSelf=self;_midi.received=^(NSString *source,UInt8 channel,UInt8 cc,UInt8 value){dispatch_async(dispatch_get_main_queue(),^{[weakSelf handleMIDI:source channel:channel cc:cc value:value];});};
+    __weak TXApp *weakSelf=self;_midi.received=^(NSString *source,UInt8 channel,UInt8 cc,UInt8 value){[weakSelf handleMIDI:source channel:channel cc:cc value:value];};
     _browser.changed=^{dispatch_async(dispatch_get_main_queue(),^{[weakSelf browserChanged];});};[_browser start];
     _midi.changed=^{dispatch_async(dispatch_get_main_queue(),^{[weakSelf deviceConnectionChanged];});};[_midi start];
     _poll=[NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(poll:) userInfo:nil repeats:YES];
     _meter=[NSTimer scheduledTimerWithTimeInterval:0.1 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:_poll forMode:NSRunLoopCommonModes];[[NSRunLoop mainRunLoop] addTimer:_meter forMode:NSRunLoopCommonModes];
-    [_window center];[_window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];[self updateStatus];
+    [_window center];[_window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];[self updateStatus];if(![[NSUserDefaults standardUserDefaults] boolForKey:@"TX6Mac.setupSeen"]||[args containsObject:@"--show-setup"])[self showSetup:nil];else if(TXMayAutoStart(_autoStart,_audioStartConsent,_explicitStop,_sleeping)){_desiredRunning=YES;[self rebuildAudio];}
 }
 - (void)loadSettings {
-    NSDictionary *d=[[NSUserDefaults standardUserDefaults] dictionaryForKey:@"TX6Mac.profile"]?:@{};
+    id stored=[[NSUserDefaults standardUserDefaults] objectForKey:@"TX6Mac.profile"];NSMutableDictionary *d=[stored isKindOfClass:NSDictionary.class]?[stored mutableCopy]:[NSMutableDictionary dictionary];
+    NSUserDefaults *defaults=NSUserDefaults.standardUserDefaults;
+    if(![defaults boolForKey:@"TX6Mac.autoStartConsentV1"]){if([stored isKindOfClass:NSDictionary.class]&&[defaults boolForKey:@"TX6Mac.setupSeen"])[defaults setBool:YES forKey:@"TX6Mac.audioStartConsent"];[defaults setBool:YES forKey:@"TX6Mac.autoStartConsentV1"];}_audioStartConsent=[defaults boolForKey:@"TX6Mac.audioStartConsent"];
+    if(![d[@"assignments"] isKindOfClass:NSArray.class])d[@"assignments"]=@[];
+    NSMutableArray *safeChannels=[NSMutableArray array];id rawChannels=d[@"channels"];
+    if([rawChannels isKindOfClass:NSArray.class])for(id raw in rawChannels){NSMutableDictionary *channel=[NSMutableDictionary dictionary];if([raw isKindOfClass:NSDictionary.class]){for(NSString *key in @[@"gain",@"muted"])if([raw[key] isKindOfClass:NSNumber.class]&&isfinite([raw[key] doubleValue]))channel[key]=raw[key];NSMutableArray *eq=[NSMutableArray array];id rawEQ=raw[@"eq"];if([rawEQ isKindOfClass:NSArray.class])for(id value in rawEQ)[eq addObject:[value isKindOfClass:NSNumber.class]&&isfinite([value doubleValue])?value:@0];channel[@"eq"]=eq;}[safeChannels addObject:channel];}d[@"channels"]=safeChannels;
+    for(NSString *key in @[@"master",@"showHUD",@"autoAssign",@"pickup",@"invert",@"autoStart"])if(d[key]&&(![d[key] isKindOfClass:NSNumber.class]||!isfinite([d[key] doubleValue])))[d removeObjectForKey:key];
+    if(![d[@"outputUID"] isKindOfClass:NSString.class])[d removeObjectForKey:@"outputUID"];
+    if(![@[@"auto",@"usb",@"ble"] containsObject:d[@"transport"]?:@""])[d removeObjectForKey:@"transport"];
     NSArray *saved=d[@"assignments"];for(int i=0;i<6;i++)[_assignments addObject:(saved.count>(NSUInteger)i&&[saved[i] isKindOfClass:NSString.class])?saved[i]:@""];
-    NSMutableDictionary *savedByKey=[NSMutableDictionary dictionary];for(NSUInteger i=0;i<6;i++)if(_assignments[i].length&&[d[@"channels"] count]>i)savedByKey[_assignments[i]]=d[@"channels"][i];
     if([_assignments[0] isEqual:@"local.tx6mac.system-sounds"]){NSMutableSet *seen=[NSMutableSet setWithObject:@"local.tx6mac.system-sounds"];for(int i=1;i<6;i++){NSString *key=_assignments[i];if(key.length&&[seen containsObject:key])_assignments[i]=@"";else if(key.length)[seen addObject:key];}}
     else {NSMutableArray *migrated=[NSMutableArray array];for(NSString *key in _assignments)if(key.length&&![key isEqual:@"local.tx6mac.system-sounds"]&&![migrated containsObject:key])[migrated addObject:key];[_assignments removeAllObjects];[_assignments addObject:@"local.tx6mac.system-sounds"];for(int i=0;i<5;i++)[_assignments addObject:migrated.count>(NSUInteger)i?migrated[i]:@""]; }
     _outputUID=d[@"outputUID"]?:[TXAudio uid:TXAudio.defaultOutput];_midi.transport=d[@"transport"]?:@"auto";
-    _hudEnabled=d[@"showHUD"]?[d[@"showHUD"] boolValue]:YES;_autoAssign=d[@"autoAssign"]?[d[@"autoAssign"] boolValue]:YES;_pickup=d[@"pickup"]?[d[@"pickup"] boolValue]:YES;_invert=[d[@"invert"] boolValue];
+    _hudEnabled=d[@"showHUD"]?[d[@"showHUD"] boolValue]:YES;_autoAssign=d[@"autoAssign"]?[d[@"autoAssign"] boolValue]:YES;_pickup=d[@"pickup"]?[d[@"pickup"] boolValue]:NO;_autoStart=d[@"autoStart"]?[d[@"autoStart"] boolValue]:YES;if(![[NSUserDefaults standardUserDefaults] boolForKey:@"TX6Mac.directControlV1"]){_pickup=NO;[[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"TX6Mac.directControlV1"];}_invert=[d[@"invert"] boolValue];
     TXRenderState *s=_audio.state;atomic_store(&s->master,d[@"master"]?fmax(0,fmin(1,[d[@"master"] floatValue])):1);
     for(int i=0;i<6;i++){
-        NSDictionary *ch=savedByKey[_assignments[i]]?:@{};
+        NSDictionary *ch=[d[@"channels"] count]>(NSUInteger)i?d[@"channels"][i]:@{};
         atomic_store(&s->gain[i],ch[@"gain"]?fmax(0,fmin(1,[ch[@"gain"] floatValue])):1);
         atomic_store(&s->muted[i],[ch[@"muted"] boolValue]);
         for(int b=0;b<3;b++)atomic_store(&s->eq[i][b],[ch[@"eq"] count]>(NSUInteger)b?fmax(-18,fmin(18,[ch[@"eq"][b] floatValue])):0);
     }
+    [self saveSettings];
 }
 - (void)saveSettings {
     NSMutableArray *channels=[NSMutableArray array];TXRenderState *s=_audio.state;
     for(int i=0;i<6;i++)[channels addObject:@{@"gain":@(atomic_load(&s->gain[i])),@"muted":@(atomic_load(&s->muted[i])),@"eq":@[@(atomic_load(&s->eq[i][0])),@(atomic_load(&s->eq[i][1])),@(atomic_load(&s->eq[i][2]))]}];
-    [[NSUserDefaults standardUserDefaults] setObject:@{@"assignments":_assignments,@"outputUID":_outputUID?:@"",@"transport":_midi.transport?:@"auto",@"autoAssign":@(_autoAssign),@"showHUD":@(_hudEnabled),@"pickup":@(_pickup),@"invert":@(_invert),@"master":@(atomic_load(&s->master)),@"channels":channels} forKey:@"TX6Mac.profile"];
+    [[NSUserDefaults standardUserDefaults] setObject:@{@"assignments":_assignments,@"outputUID":_outputUID?:@"",@"transport":_midi.transport?:@"auto",@"autoAssign":@(_autoAssign),@"autoStart":@(_autoStart),@"showHUD":@(_hudEnabled),@"pickup":@(_pickup),@"invert":@(_invert),@"master":@(atomic_load(&s->master)),@"channels":channels} forKey:@"TX6Mac.profile"];
     _lastSave=NSDate.date;[self sendBrowserControls];
 }
 - (void)buildWindow {
     _window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,1060,850) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskMiniaturizable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
-    _window.title=@"TX · MAC — 프로그램별 믹서";_window.contentMinSize=NSMakeSize(900,570);_window.delegate=self;_window.releasedWhenClosed=NO;_window.backgroundColor=Color(0xD8D9D4);
+    _window.title=TXL(@"TX · MAC — 프로그램별 믹서");_window.contentMinSize=NSMakeSize(900,570);_window.delegate=self;_window.releasedWhenClosed=NO;_window.backgroundColor=Color(0xD8D9D4);
     _window.appearance=[NSAppearance appearanceNamed:NSAppearanceNameAqua];_canvas=[[TXCanvas alloc] initWithFrame:NSMakeRect(0,0,1060,850)];
     NSScrollView *scroll=[[NSScrollView alloc] initWithFrame:NSMakeRect(0,0,1060,850)];scroll.hasVerticalScroller=YES;scroll.hasHorizontalScroller=YES;scroll.autohidesScrollers=YES;scroll.drawsBackground=NO;scroll.documentView=_canvas;scroll.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;_window.contentView=scroll;
     CGFloat available=(NSScreen.mainScreen.visibleFrame.size.height?:930)-80;if(available<850)[_window setContentSize:NSMakeSize(1060,MAX(570,available))];
-    [_canvas addSubview:Label(@"OUTPUT",NSMakeRect(24,91,62,18),10,YES)];_outputMenu=[[TXPopup alloc] initWithFrame:NSMakeRect(83,83,310,28) pullsDown:NO];_outputMenu.target=self;_outputMenu.action=@selector(outputChanged:);_outputMenu.font=[NSFont systemFontOfSize:12];_outputMenu.accessibilityLabel=@"오디오 출력 장치";[_canvas addSubview:_outputMenu];
-    _transportMenu=[[TXPopup alloc] initWithFrame:NSMakeRect(410,83,145,28) pullsDown:NO];for(NSArray *v in @[@[@"MIDI 자동",@"auto"],@[@"USB MIDI",@"usb"],@[@"Bluetooth MIDI",@"ble"]]){[_transportMenu addItemWithTitle:v[0]];_transportMenu.lastItem.representedObject=v[1];}for(NSMenuItem *item in _transportMenu.itemArray)if([item.representedObject isEqual:_midi.transport])[_transportMenu selectItem:item];_transportMenu.target=self;_transportMenu.action=@selector(transportChanged:);[_canvas addSubview:_transportMenu];
-    [_canvas addSubview:Button(@"Bluetooth 연결…",NSMakeRect(565,83,138,28),self,@selector(showBluetooth:))];
-    [_canvas addSubview:Button(@"오디오 권한…",NSMakeRect(865,699,167,29),self,@selector(showPrivacy:))];
-    _startButton=Button(@"믹서 시작",NSMakeRect(865,259,167,36),self,@selector(primaryControl:));_startButton.bezelColor=Color(0xF36B2F);[_canvas addSubview:_startButton];
+    [_canvas addSubview:Label(@"OUTPUT",NSMakeRect(24,91,62,18),10,YES)];_outputMenu=[[TXPopup alloc] initWithFrame:NSMakeRect(83,83,310,28) pullsDown:NO];_outputMenu.target=self;_outputMenu.action=@selector(outputChanged:);_outputMenu.font=[NSFont systemFontOfSize:12];_outputMenu.accessibilityLabel=TXL(@"오디오 출력 장치");[_canvas addSubview:_outputMenu];
+    _transportMenu=[[TXPopup alloc] initWithFrame:NSMakeRect(410,83,145,28) pullsDown:NO];for(NSArray *v in @[@[TXL(@"MIDI 자동"),@"auto"],@[@"USB MIDI",@"usb"],@[@"Bluetooth MIDI",@"ble"]]){[_transportMenu addItemWithTitle:v[0]];_transportMenu.lastItem.representedObject=v[1];}for(NSMenuItem *item in _transportMenu.itemArray)if([item.representedObject isEqual:_midi.transport])[_transportMenu selectItem:item];_transportMenu.target=self;_transportMenu.action=@selector(transportChanged:);[_canvas addSubview:_transportMenu];
+    [_canvas addSubview:Button(TXL(@"Bluetooth 연결…"),NSMakeRect(565,83,138,28),self,@selector(showBluetooth:))];
+    [_canvas addSubview:Button(TXL(@"오디오 권한…"),NSMakeRect(865,699,167,29),self,@selector(showPrivacy:))];
+    _startButton=Button(TXL(@"믹서 시작"),NSMakeRect(865,259,167,36),self,@selector(primaryControl:));_startButton.bezelColor=Color(0xF36B2F);[_canvas addSubview:_startButton];
     NSMutableArray *channelViews=[NSMutableArray array];TXRenderState *s=_audio.state;
     NSArray *names=@[@"HIGH",@"MID",@"LOW"],*frequencies=@[@"8 kHz",@"1 kHz",@"120 Hz"];unsigned colors[3]={0x608CA6,0xF36B2F,0xF1F1E9};
     for(int i=0;i<6;i++){
         TXChannel *c=[[TXChannel alloc] initWithFrame:NSMakeRect(24+i*136,130,136,634)];c.slot=i;
-        c.assignment=[[TXPopup alloc] initWithFrame:NSMakeRect(7,62,122,25) pullsDown:NO];c.assignment.font=[NSFont systemFontOfSize:11];c.assignment.target=self;c.assignment.action=@selector(assignmentChanged:);c.assignment.tag=i;c.assignment.accessibilityLabel=i==0?@"트랙 1 시스템 사운드 고정":[NSString stringWithFormat:@"트랙 %d 프로그램",i+1];c.assignment.enabled=i!=0;[c addSubview:c.assignment];
+        c.assignment=[[TXPopup alloc] initWithFrame:NSMakeRect(7,62,122,25) pullsDown:NO];c.assignment.font=[NSFont systemFontOfSize:11];c.assignment.target=self;c.assignment.action=@selector(assignmentChanged:);c.assignment.tag=i;c.assignment.accessibilityLabel=i==0?TXL(@"트랙 1 시스템 사운드 고정"):[NSString stringWithFormat:TXL(@"트랙 %d 프로그램"),i+1];c.assignment.enabled=i!=0;[c addSubview:c.assignment];
         NSMutableArray *knobs=[NSMutableArray array];for(int j=0;j<3;j++){
-            TXKnob *k=[[TXKnob alloc] initWithFrame:NSMakeRect(30,110+j*90,76,92)];k.caption=names[j];k.frequency=frequencies[j];k.accent=Color(colors[j]);k.value=atomic_load(&s->eq[i][2-j]);k.tag=i*3+(2-j);k.target=self;k.action=@selector(eqChanged:);k.accessibilityRole=NSAccessibilitySliderRole;k.accessibilityLabel=[NSString stringWithFormat:@"트랙 %d %@ EQ",i+1,names[j]];k.awaitingPickup=_pickup;k.toolTip=@"위아래 드래그 또는 스크롤. 두 번 클릭하면 0 dB. Shift로 미세 조절.";[knobs addObject:k];[c addSubview:k];}
+            TXKnob *k=[[TXKnob alloc] initWithFrame:NSMakeRect(30,110+j*90,76,92)];k.caption=names[j];k.frequency=frequencies[j];k.accent=Color(colors[j]);k.value=atomic_load(&s->eq[i][2-j]);k.tag=i*3+(2-j);k.target=self;k.action=@selector(eqChanged:);k.accessibilityRole=NSAccessibilitySliderRole;k.accessibilityLabel=[NSString stringWithFormat:TXL(@"트랙 %d %@ EQ"),i+1,names[j]];k.awaitingPickup=_pickup;k.toolTip=TXL(@"위아래 드래그 또는 스크롤. 두 번 클릭하면 0 dB. Shift로 미세 조절.");[knobs addObject:k];[c addSubview:k];}
         c.knobs=knobs;c.fader=[[TXFader alloc] initWithFrame:NSMakeRect(21,455,94,0)];
         // 실제 TX-6처럼 EQ 세 줄 아래에 페이더와 채널 버튼을 배치합니다.
         for(int j=0;j<3;j++)c.knobs[j].frame=NSMakeRect(30,110+j*90,76,92);
-        c.fader.frame=NSMakeRect(22,402,92,151);c.fader.value=atomic_load(&s->gain[i]);c.fader.awaitingPickup=_pickup;c.fader.tag=i;c.fader.target=self;c.fader.action=@selector(gainChanged:);c.fader.accessibilityRole=NSAccessibilitySliderRole;c.fader.accessibilityLabel=[NSString stringWithFormat:@"트랙 %d 음량",i+1];[c addSubview:c.fader];
-        c.activity=Label(@"미지정",NSMakeRect(9,560,118,18),10,NO);c.activity.alignment=NSTextAlignmentCenter;[c addSubview:c.activity];
-        c.mute=Button(@"MUTE",NSMakeRect(18,588,100,31),self,@selector(muteChanged:));c.mute.tag=i;c.mute.buttonType=NSButtonTypePushOnPushOff;c.mute.state=atomic_load(&s->muted[i])?NSControlStateValueOn:NSControlStateValueOff;c.mute.font=Mono(10,NSFontWeightSemibold);c.mute.accessibilityLabel=[NSString stringWithFormat:@"트랙 %d 음소거",i+1];[c addSubview:c.mute];
+        c.fader.frame=NSMakeRect(22,402,92,151);c.fader.value=atomic_load(&s->gain[i]);c.fader.awaitingPickup=_pickup;c.fader.tag=i;c.fader.target=self;c.fader.action=@selector(gainChanged:);c.fader.accessibilityRole=NSAccessibilitySliderRole;c.fader.accessibilityLabel=[NSString stringWithFormat:TXL(@"트랙 %d 음량"),i+1];[c addSubview:c.fader];
+        c.activity=Label(TXL(@"미지정"),NSMakeRect(9,560,118,18),10,NO);c.activity.alignment=NSTextAlignmentCenter;[c addSubview:c.activity];
+        c.mute=Button(@"MUTE",NSMakeRect(18,588,100,31),self,@selector(muteChanged:));c.mute.tag=i;c.mute.buttonType=NSButtonTypePushOnPushOff;c.mute.state=atomic_load(&s->muted[i])?NSControlStateValueOn:NSControlStateValueOff;c.mute.font=Mono(10,NSFontWeightSemibold);c.mute.accessibilityLabel=[NSString stringWithFormat:TXL(@"트랙 %d 음소거"),i+1];[c addSubview:c.mute];
         [_canvas addSubview:c];[channelViews addObject:c];
     }_channels=channelViews;
     [_canvas addSubview:Label(@"SELECT",NSMakeRect(865,315,167,28),25,YES)];
     [_canvas addSubview:Label(@"ALL APPLICATIONS",NSMakeRect(865,342,167,16),9,YES)];
-    _masterFader=[[TXFader alloc] initWithFrame:NSMakeRect(874,366,150,153)];_browserLabel.stringValue=_browser.connected?@"Chrome 오디오 탭 자동 감지 · 음소거 바로 가능\n개별 음량·EQ는 해당 탭에서 ⌘⇧6으로 연결":@"Chrome 확장을 연결하면 재생 탭 자동 감지\n개별 음량·EQ 연결 단축키: ⌘⇧6";_remainderLabel.stringValue=_overflowCount>0?[NSString stringWithFormat:@"추가 %ld개 앱은 MASTER 적용",(long)_overflowCount]:@"미지정 앱도 MASTER 적용";_masterFader.rotary=YES;_masterFader.value=atomic_load(&s->master);_masterFader.target=self;_masterFader.action=@selector(masterChanged:);_masterFader.accessibilityRole=NSAccessibilitySliderRole;_masterFader.accessibilityLabel=@"전체 음량";[_canvas addSubview:_masterFader];
+    _masterFader=[[TXFader alloc] initWithFrame:NSMakeRect(874,366,150,153)];_browserLabel.stringValue=_browser.connected?TXL(@"Chrome 오디오 탭 자동 감지 · 음소거 바로 가능\n개별 음량·EQ는 해당 탭에서 ⌘⇧6으로 연결"):TXL(@"Chrome 확장을 연결하면 재생 탭 자동 감지\n개별 음량·EQ 연결 단축키: ⌘⇧6");_remainderLabel.stringValue=_overflowCount>0?[NSString stringWithFormat:TXL(@"추가 %ld개 앱은 MASTER 적용"),(long)_overflowCount]:TXL(@"미지정 앱도 MASTER 적용");_masterFader.rotary=YES;_masterFader.value=atomic_load(&s->master);_masterFader.target=self;_masterFader.action=@selector(masterChanged:);_masterFader.accessibilityRole=NSAccessibilitySliderRole;_masterFader.accessibilityLabel=TXL(@"전체 음량");[_canvas addSubview:_masterFader];
     _soundKey=Button(@"FX I\nSOUND",NSMakeRect(865,540,78,44),self,@selector(soundKey:));[_canvas addSubview:_soundKey];_masterMute=Button(@"FX II\nMUTE",NSMakeRect(954,540,78,44),self,@selector(muteKey:));[_canvas addSubview:_masterMute];
-    [_canvas addSubview:Button(@"EQ 초기화",NSMakeRect(865,607,167,29),self,@selector(resetEQ:))];
-    _autoButton=[NSButton checkboxWithTitle:@"자동 앱 매칭" target:self action:@selector(autoChanged:)];_autoButton.frame=NSMakeRect(863,673,167,21);_autoButton.state=_autoAssign?NSControlStateValueOn:NSControlStateValueOff;_autoButton.font=[NSFont systemFontOfSize:11];_autoButton.toolTip=@"재생 중인 앱을 트랙에 자동 배정합니다. 수동 지정하면 자동 매칭이 꺼집니다.";
-    _pickupButton=[NSButton checkboxWithTitle:@"하드웨어 픽업" target:self action:@selector(settingsChanged:)];_pickupButton.frame=NSMakeRect(863,701,167,21);_pickupButton.state=_pickup?NSControlStateValueOn:NSControlStateValueOff;_pickupButton.font=[NSFont systemFontOfSize:11];_pickupButton.toolTip=@"페이더를 현재 표시값까지 움직여야 연결됩니다. 처음에는 맨 위(100%)까지 올리세요. 노브도 현재 EQ값에 맞추면 연결됩니다. 끄면 즉시 반응합니다.";
-    _invertButton=[NSButton checkboxWithTitle:@"페이더 방향 반전" target:self action:@selector(settingsChanged:)];_invertButton.frame=NSMakeRect(863,729,167,21);_invertButton.state=_invert?NSControlStateValueOn:NSControlStateValueOff;_invertButton.font=[NSFont systemFontOfSize:11];NSViewController *settings=[NSViewController new];settings.view=[[NSView alloc] initWithFrame:NSMakeRect(0,0,360,520)];
-    _autoButton.frame=NSMakeRect(18,473,324,24);_pickupButton.frame=NSMakeRect(18,437,324,24);_invertButton.frame=NSMakeRect(18,401,324,24);[settings.view addSubview:_autoButton];[settings.view addSubview:_pickupButton];[settings.view addSubview:_invertButton];_hudButton=[NSButton checkboxWithTitle:@"조절 시 상태 표시" target:self action:@selector(settingsChanged:)];_hudButton.frame=NSMakeRect(18,365,324,24);_hudButton.state=_hudEnabled?NSControlStateValueOn:NSControlStateValueOff;[settings.view addSubview:_hudButton];
-    _deviceContextLabel=Label(@"TX-6 홈 화면 확인 필요",NSMakeRect(18,311,324,40),11,NO);_deviceContextLabel.maximumNumberOfLines=2;_deviceContextLabel.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:_deviceContextLabel];
-    _resumeDeviceButton=Button(@"기기 홈 화면 확인 · TX-6 제어 재개",NSMakeRect(18,276,324,29),self,@selector(resumeDeviceControls:));[settings.view addSubview:_resumeDeviceButton];
-    [settings.view addSubview:Label(@"기기 현재 메인 숫자와 맞추기 (0~100)",NSMakeRect(18,243,324,22),11,NO)];
-    _calibrationInput=[[NSTextField alloc] initWithFrame:NSMakeRect(18,207,99,27)];_calibrationInput.placeholderString=@"0–100";_calibrationInput.font=Mono(12,NSFontWeightMedium);_calibrationInput.alignment=NSTextAlignmentCenter;NSNumberFormatter *formatter=[NSNumberFormatter new];formatter.minimum=@0;formatter.maximum=@100;formatter.allowsFloats=NO;_calibrationInput.formatter=formatter;_calibrationInput.target=self;_calibrationInput.action=@selector(calibrateMaster:);_calibrationInput.accessibilityLabel=@"TX-6 현재 메인 숫자 0부터 100";[settings.view addSubview:_calibrationInput];
-    [settings.view addSubview:Button(@"맥 전체 음량에 맞춤",NSMakeRect(130,207,212,28),self,@selector(calibrateMaster:))];NSTextField *calibrationNote=Label(@"입력한 숫자를 맥 전체 음량 %로 설정합니다.\n기기 자동 조회·상시 동기화 기능은 아닙니다.",NSMakeRect(18,151,324,46),10,NO);calibrationNote.maximumNumberOfLines=2;calibrationNote.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:calibrationNote];[settings.view addSubview:Label(@"CH 01 시스템 사운드 고정 · CH 02–06 앱 / 탭",NSMakeRect(18,109,324,24),10,NO)];_browserLabel=Label(@"Chrome 탭: 확장 아이콘에서 연결",NSMakeRect(18,20,324,64),11,NO);_browserLabel.maximumNumberOfLines=2;_browserLabel.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:_browserLabel];_settingsPopover=[NSPopover new];_settingsPopover.behavior=NSPopoverBehaviorTransient;_settingsPopover.contentViewController=settings;
-    [_canvas addSubview:Button(@"SETUP / 설정",NSMakeRect(865,653,167,29),self,@selector(showSettings:))];
-    _remainderLabel=Label(@"미지정 앱도 MASTER 적용",NSMakeRect(865,748,167,22),10,NO);[_canvas addSubview:_remainderLabel];
-    NSMenu *main=[NSMenu new],*appMenu=[NSMenu new];NSMenuItem *appItem=[NSMenuItem new];appItem.submenu=appMenu;[main addItem:appItem];[appMenu addItemWithTitle:@"TX · MAC 정보" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];[appMenu addItem:NSMenuItem.separatorItem];[appMenu addItemWithTitle:@"TX · MAC 숨기기" action:@selector(hide:) keyEquivalent:@"h"];[appMenu addItemWithTitle:@"TX · MAC 종료" action:@selector(terminate:) keyEquivalent:@"q"];NSApp.mainMenu=main;
+    [_canvas addSubview:Button(TXL(@"EQ 초기화"),NSMakeRect(865,607,167,29),self,@selector(resetEQ:))];
+    _autoButton=[NSButton checkboxWithTitle:TXL(@"자동 앱 매칭") target:self action:@selector(autoChanged:)];_autoButton.frame=NSMakeRect(863,673,167,21);_autoButton.state=_autoAssign?NSControlStateValueOn:NSControlStateValueOff;_autoButton.font=[NSFont systemFontOfSize:11];_autoButton.toolTip=TXL(@"재생 앱을 빈 채널에 배정합니다. 일시정지해도 채널과 물리 음량·EQ·음소거는 고정됩니다. 수동 지정하면 자동 매칭이 꺼집니다.");
+    _pickupButton=[NSButton checkboxWithTitle:TXL(@"하드웨어 픽업") target:self action:@selector(settingsChanged:)];_pickupButton.frame=NSMakeRect(863,701,167,21);_pickupButton.state=_pickup?NSControlStateValueOn:NSControlStateValueOff;_pickupButton.font=[NSFont systemFontOfSize:11];_pickupButton.toolTip=TXL(@"기본은 꺼짐이며 페이더와 노브가 즉시 반응합니다. 켜면 현재 맥 값에 맞출 때까지 기다리는 소프트 픽업을 사용합니다.");
+    _invertButton=[NSButton checkboxWithTitle:TXL(@"페이더 방향 반전") target:self action:@selector(settingsChanged:)];_invertButton.frame=NSMakeRect(863,729,167,21);_invertButton.state=_invert?NSControlStateValueOn:NSControlStateValueOff;_invertButton.font=[NSFont systemFontOfSize:11];NSViewController *settings=[NSViewController new];settings.view=[[NSView alloc] initWithFrame:NSMakeRect(0,0,400,672)];
+    [settings.view addSubview:Label(TXL(@"언어"),NSMakeRect(18,628,100,24),11,NO)];
+    _languageMenu=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(122,626,260,28) pullsDown:NO];_languageMenu.target=self;_languageMenu.action=@selector(languageChanged:);_languageMenu.accessibilityLabel=TXL(@"언어");
+    for(NSArray *entry in @[@[TXL(@"시스템 설정"),@"system"],@[@"English",@"en"],@[@"한국어",@"ko"],@[@"日本語",@"ja"]]){[_languageMenu addItemWithTitle:entry[0]];_languageMenu.lastItem.representedObject=entry[1];if([entry[1] isEqual:TXLanguageCode()])[_languageMenu selectItem:_languageMenu.lastItem];}[settings.view addSubview:_languageMenu];
+    _autoStartButton=[NSButton checkboxWithTitle:TXL(@"믹서 자동 시작 및 연결 복구") target:self action:@selector(autoStartChanged:)];_autoStartButton.frame=NSMakeRect(18,582,364,25);_autoStartButton.state=_autoStart?NSControlStateValueOn:NSControlStateValueOff;[settings.view addSubview:_autoStartButton];
+    [settings.view addSubview:Button(TXL(@"시작 안내 및 권한…"),NSMakeRect(18,536,364,30),self,@selector(showSetup:))];
+    _autoButton.frame=NSMakeRect(18,473,364,24);_pickupButton.frame=NSMakeRect(18,437,324,24);_invertButton.frame=NSMakeRect(18,401,324,24);[settings.view addSubview:_autoButton];[settings.view addSubview:_pickupButton];[settings.view addSubview:_invertButton];_hudButton=[NSButton checkboxWithTitle:TXL(@"조절 시 상태 표시") target:self action:@selector(settingsChanged:)];_hudButton.frame=NSMakeRect(18,365,324,24);_hudButton.state=_hudEnabled?NSControlStateValueOn:NSControlStateValueOff;[settings.view addSubview:_hudButton];
+    _deviceContextLabel=Label(TXL(@"TX-6 홈 화면 확인 필요"),NSMakeRect(18,311,324,40),11,NO);_deviceContextLabel.maximumNumberOfLines=2;_deviceContextLabel.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:_deviceContextLabel];
+    _resumeDeviceButton=Button(TXL(@"기기 홈 화면 확인 · TX-6 제어 재개"),NSMakeRect(18,276,324,29),self,@selector(resumeDeviceControls:));[settings.view addSubview:_resumeDeviceButton];
+    [settings.view addSubview:Label(TXL(@"기기 현재 메인 숫자와 맞추기 (0~100)"),NSMakeRect(18,243,324,22),11,NO)];
+    _calibrationInput=[[NSTextField alloc] initWithFrame:NSMakeRect(18,207,99,27)];_calibrationInput.placeholderString=@"0–100";_calibrationInput.font=Mono(12,NSFontWeightMedium);_calibrationInput.alignment=NSTextAlignmentCenter;NSNumberFormatter *formatter=[NSNumberFormatter new];formatter.minimum=@0;formatter.maximum=@100;formatter.allowsFloats=NO;_calibrationInput.formatter=formatter;_calibrationInput.target=self;_calibrationInput.action=@selector(calibrateMaster:);_calibrationInput.accessibilityLabel=TXL(@"TX-6 현재 메인 숫자 0부터 100");[settings.view addSubview:_calibrationInput];
+    [settings.view addSubview:Button(TXL(@"맥 전체 음량에 맞춤"),NSMakeRect(130,207,212,28),self,@selector(calibrateMaster:))];NSTextField *calibrationNote=Label(TXL(@"입력한 숫자를 맥 전체 음량 %로 설정합니다.\n기기 자동 조회·상시 동기화 기능은 아닙니다."),NSMakeRect(18,151,324,46),10,NO);calibrationNote.maximumNumberOfLines=2;calibrationNote.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:calibrationNote];[settings.view addSubview:Label(TXL(@"CH 01 시스템 사운드 고정 · CH 02–06 앱 / 탭"),NSMakeRect(18,109,324,24),10,NO)];_browserLabel=Label(TXL(@"Chrome 탭: 확장 아이콘에서 연결"),NSMakeRect(18,20,324,64),11,NO);_browserLabel.maximumNumberOfLines=2;_browserLabel.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:_browserLabel];_settingsPopover=[NSPopover new];_settingsPopover.behavior=NSPopoverBehaviorTransient;_settingsPopover.contentViewController=settings;
+    [_canvas addSubview:Button(TXL(@"SETUP / 설정"),NSMakeRect(865,653,167,29),self,@selector(showSettings:))];
+    _remainderLabel=Label(TXL(@"미지정 앱도 MASTER 적용"),NSMakeRect(865,748,167,22),10,NO);[_canvas addSubview:_remainderLabel];
+    NSMenu *main=[NSMenu new],*appMenu=[NSMenu new];NSMenuItem *appItem=[NSMenuItem new];appItem.submenu=appMenu;[main addItem:appItem];[appMenu addItemWithTitle:TXL(@"TX · MAC 정보") action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];[appMenu addItem:NSMenuItem.separatorItem];NSMenuItem *preferences=[appMenu addItemWithTitle:TXL(@"설정…") action:@selector(openPreferences:) keyEquivalent:@","];preferences.target=self;NSMenuItem *guide=[appMenu addItemWithTitle:TXL(@"시작 안내 및 권한…") action:@selector(showSetup:) keyEquivalent:@""];guide.target=self;[appMenu addItem:NSMenuItem.separatorItem];[appMenu addItemWithTitle:TXL(@"TX · MAC 숨기기") action:@selector(hide:) keyEquivalent:@"h"];[appMenu addItemWithTitle:TXL(@"TX · MAC 종료") action:@selector(terminate:) keyEquivalent:@"q"];NSApp.mainMenu=main;
 }
 - (NSView*)sliderViewForSlot:(NSInteger)slot band:(NSInteger)band {
     NSView *v=[[NSView alloc] initWithFrame:NSMakeRect(0,0,280,38)];NSSlider *slider=[NSSlider sliderWithValue:0 minValue:band<0?0:-18 maxValue:band<0?1:18 target:self action:@selector(menuSliderChanged:)];slider.frame=NSMakeRect(15,8,205,22);slider.tag=slot*10+band+1;
-    slider.enabled=slot==6||[self canAdjustVolumeForSlot:slot];if(!slider.enabled)slider.toolTip=@"음소거 가능 · 음량/EQ는 Chrome 탭에서 ⌘⇧6으로 연결";slider.doubleValue=slot==6?atomic_load(&_audio.state->master):(band<0?atomic_load(&_audio.state->gain[slot]):atomic_load(&_audio.state->eq[slot][band]));[v addSubview:slider];
+    slider.enabled=slot==6||[self canAdjustVolumeForSlot:slot];if(!slider.enabled)slider.toolTip=TXL(@"음소거 가능 · 음량/EQ는 Chrome 탭에서 ⌘⇧6으로 연결");slider.doubleValue=slot==6?atomic_load(&_audio.state->master):(band<0?atomic_load(&_audio.state->gain[slot]):atomic_load(&_audio.state->eq[slot][band]));[v addSubview:slider];
     NSTextField *value=Label(band<0?[NSString stringWithFormat:@"%.0f%%",slider.doubleValue*100]:[NSString stringWithFormat:@"%+.0f",slider.doubleValue],NSMakeRect(225,11,48,18),11,YES);value.tag=999;[v addSubview:value];return v;
 }
 - (void)buildStatusItem {
-    _statusItem=[[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];_statusItem.button.image=[self menuIcon];_statusItem.button.imagePosition=NSImageOnly;_statusItem.button.toolTip=@"TX · MAC — 프로그램별 음량과 EQ";
+    _statusItem=[[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];_statusItem.button.image=[self menuIcon];_statusItem.button.imagePosition=NSImageOnly;_statusItem.button.toolTip=TXL(@"TX · MAC — 프로그램별 음량과 EQ");
     _statusMenu=[NSMenu new];_statusMenu.delegate=self;_statusItem.menu=_statusMenu;
 }
 - (NSImage*)menuIcon {
@@ -355,27 +371,27 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 }
 - (void)menuWillOpen:(NSMenu*)menu {
     _statusMenuTracking=YES;[self hideHUD:nil];_pendingHUD=nil;[menu removeAllItems];NSMenuItem *title=[[NSMenuItem alloc] initWithTitle:@"TX · MAC / SIX CHANNEL" action:nil keyEquivalent:@""];title.enabled=NO;[menu addItem:title];
-    NSMenuItem *status=[[NSMenuItem alloc] initWithTitle:_audio.running?(atomic_load(&_audio.state->callbacks)>0?@"● 믹서 실행 중":@"○ 오디오 대기 · 권한 확인"):@"○ 믹서 대기 중" action:nil keyEquivalent:@""];status.enabled=NO;[menu addItem:status];if(_deviceContext.suspended||_deviceContext.shiftDown){NSMenuItem *resume=[[NSMenuItem alloc] initWithTitle:@"홈 화면 확인 후 TX-6 제어 재개" action:@selector(resumeDeviceControls:) keyEquivalent:@""];resume.target=self;[menu addItem:resume];}
-    [menu addItem:NSMenuItem.separatorItem];[menu addItemWithTitle:@"전체 음량" action:nil keyEquivalent:@""];
+    NSMenuItem *status=[[NSMenuItem alloc] initWithTitle:_audio.running?(atomic_load(&_audio.state->callbacks)>0?TXL(@"● 믹서 실행 중"):TXL(@"○ 오디오 대기 · 권한 확인")):TXL(@"○ 믹서 대기 중") action:nil keyEquivalent:@""];status.enabled=NO;[menu addItem:status];if(_deviceContext.suspended||_deviceContext.shiftDown){NSMenuItem *resume=[[NSMenuItem alloc] initWithTitle:TXL(@"홈 화면 확인 후 TX-6 제어 재개") action:@selector(resumeDeviceControls:) keyEquivalent:@""];resume.target=self;[menu addItem:resume];}
+    [menu addItem:NSMenuItem.separatorItem];[menu addItemWithTitle:TXL(@"전체 음량") action:nil keyEquivalent:@""];
     NSMenuItem *master=[NSMenuItem new];master.view=[self sliderViewForSlot:6 band:-1];[menu addItem:master];
-    NSMenuItem *mute=[[NSMenuItem alloc] initWithTitle:@"전체 음소거" action:@selector(masterMenuMute:) keyEquivalent:@""];mute.target=self;mute.state=atomic_load(&_audio.state->masterMuted)?NSControlStateValueOn:NSControlStateValueOff;[menu addItem:mute];
+    NSMenuItem *mute=[[NSMenuItem alloc] initWithTitle:TXL(@"전체 음소거") action:@selector(masterMenuMute:) keyEquivalent:@""];mute.target=self;mute.state=atomic_load(&_audio.state->masterMuted)?NSControlStateValueOn:NSControlStateValueOff;[menu addItem:mute];
     [menu addItem:NSMenuItem.separatorItem];
     for(int i=0;i<6;i++){
-        NSString *name=[self nameForKey:_assignments[i]];NSMenuItem *channel=[[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%02d  %@",i+1,name.length?name:@"앱 미지정"] action:nil keyEquivalent:@""];NSMenu *sub=[NSMenu new];channel.submenu=sub;
-        NSMenuItem *chMute=[[NSMenuItem alloc] initWithTitle:@"음소거" action:@selector(menuMute:) keyEquivalent:@""];chMute.tag=i;chMute.target=self;chMute.state=atomic_load(&_audio.state->muted[i])?NSControlStateValueOn:NSControlStateValueOff;[sub addItem:chMute];
-        for(int b=-1;b<3;b++){[sub addItemWithTitle:b<0?@"음량":@[@"LOW · 120 Hz",@"MID · 1 kHz",@"HIGH · 8 kHz"][b] action:nil keyEquivalent:@""];NSMenuItem *s=[NSMenuItem new];s.view=[self sliderViewForSlot:i band:b];[sub addItem:s];}
+        NSString *name=[self nameForKey:_assignments[i]];NSMenuItem *channel=[[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%02d  %@",i+1,name.length?name:TXL(@"앱 미지정")] action:nil keyEquivalent:@""];NSMenu *sub=[NSMenu new];channel.submenu=sub;
+        NSMenuItem *chMute=[[NSMenuItem alloc] initWithTitle:TXL(@"음소거") action:@selector(menuMute:) keyEquivalent:@""];chMute.tag=i;chMute.target=self;chMute.state=atomic_load(&_audio.state->muted[i])?NSControlStateValueOn:NSControlStateValueOff;[sub addItem:chMute];
+        for(int b=-1;b<3;b++){[sub addItemWithTitle:b<0?TXL(@"음량"):@[@"LOW · 120 Hz",@"MID · 1 kHz",@"HIGH · 8 kHz"][b] action:nil keyEquivalent:@""];NSMenuItem *s=[NSMenuItem new];s.view=[self sliderViewForSlot:i band:b];[sub addItem:s];}
         [menu addItem:channel];
     }
-    [menu addItem:NSMenuItem.separatorItem];NSMenuItem *output=[[NSMenuItem alloc] initWithTitle:@"출력 장치" action:nil keyEquivalent:@""];NSMenu *outs=[NSMenu new];output.submenu=outs;
+    [menu addItem:NSMenuItem.separatorItem];NSMenuItem *output=[[NSMenuItem alloc] initWithTitle:TXL(@"출력 장치") action:nil keyEquivalent:@""];NSMenu *outs=[NSMenu new];output.submenu=outs;
     for(NSDictionary *d in _outputs){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:d[@"name"] action:@selector(menuOutput:) keyEquivalent:@""];item.target=self;item.representedObject=d[@"uid"];item.state=[d[@"uid"] isEqual:_outputUID]?NSControlStateValueOn:NSControlStateValueOff;[outs addItem:item];}[menu addItem:output];
-    for(NSArray *entry in @[@[@"믹서 창 열기",NSStringFromSelector(@selector(showWindow:))],@[@"Bluetooth 연결…",NSStringFromSelector(@selector(showBluetooth:))],@[_desiredRunning?@"믹서 중지 · 원음 복구":@"믹서 시작",NSStringFromSelector(@selector(toggleMixer:))]]){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:@""];item.target=self;[menu addItem:item];}
-    [menu addItem:NSMenuItem.separatorItem];NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:@"종료 · 원음 복구" action:@selector(terminate:) keyEquivalent:@"q"];[menu addItem:quit];
+    for(NSArray *entry in @[@[TXL(@"믹서 창 열기"),NSStringFromSelector(@selector(showWindow:))],@[TXL(@"Bluetooth 연결…"),NSStringFromSelector(@selector(showBluetooth:))],@[_desiredRunning?TXL(@"믹서 중지 · 원음 복구"):TXL(@"믹서 시작"),NSStringFromSelector(@selector(toggleMixer:))]]){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:@""];item.target=self;[menu addItem:item];}
+    [menu addItem:NSMenuItem.separatorItem];NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:TXL(@"종료 · 원음 복구") action:@selector(terminate:) keyEquivalent:@"q"];[menu addItem:quit];
 }
 - (void)menuDidClose:(NSMenu*)menu {
     _statusMenuTracking=NO;[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(displayPendingHUD) object:nil];[self performSelector:@selector(displayPendingHUD) withObject:nil afterDelay:0.12 inModes:@[NSRunLoopCommonModes]];
 }
 - (void)showHUDForSlot:(NSInteger)slot message:(NSString*)message {
-    if(!_hudEnabled)return;NSString *name=slot>=0&&slot<6?[self nameForKey:_assignments[slot]]:@"전체 오디오";if(!name.length)name=@"앱 미지정";
+    if(!_hudEnabled)return;NSString *name=slot>=0&&slot<6?[self nameForKey:_assignments[slot]]:TXL(@"전체 오디오");if(!name.length)name=TXL(@"앱 미지정");
     _pendingHUD=@{@"heading":slot>=0&&slot<6?[NSString stringWithFormat:@"CHANNEL %02ld / %@",(long)slot+1,slot==0?@"OS":@"APP"]:@"MASTER / ALL AUDIO",@"application":name,@"message":message?:@"",@"time":NSDate.date};
     if(!_statusMenuTracking)[self displayPendingHUD];
 }
@@ -388,32 +404,35 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     [_hudDismiss invalidate];_hudDismiss=[NSTimer timerWithTimeInterval:1.8 target:self selector:@selector(hideHUD:) userInfo:nil repeats:NO];[[NSRunLoop mainRunLoop] addTimer:_hudDismiss forMode:NSRunLoopCommonModes];[self writeStatus];
 }
 - (void)hideHUD:(id)sender {[_hudDismiss invalidate];_hudDismiss=nil;[_hud orderOut:nil];[self writeStatus];}
-- (NSString*)nameForKey:(NSString*)key {if([key isEqual:@"local.tx6mac.system-sounds"])return @"시스템 사운드";for(NSDictionary *p in _processes)if([p[@"key"] isEqual:key])return p[@"name"];if(!key.length)return @"";if([key hasPrefix:@"chrome-tab:"])return @"Chrome 탭 연결 대기";NSURL *url=[[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:key];return url?[[NSFileManager defaultManager] displayNameAtPath:url.path]:key;}
+- (NSString*)nameForKey:(NSString*)key {if([key isEqual:@"local.tx6mac.system-sounds"])return TXL(@"시스템 사운드");for(NSDictionary *p in _processes)if([p[@"key"] isEqual:key])return p[@"name"];if(!key.length)return @"";if([key hasPrefix:@"chrome-tab:"])return TXL(@"Chrome 탭 연결 대기");NSURL *url=[[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:key];return url?[[NSFileManager defaultManager] displayNameAtPath:url.path]:key;}
 - (void)refreshDevices {
     _outputs=TXAudio.outputs;NSMutableArray *processes=[TXAudio.processes mutableCopy];BOOL captured=NO;
-    for(NSDictionary *tab in _browser.tabs)if([tab[@"captured"] boolValue]||[tab[@"active"] boolValue]||[_assignments containsObject:[self keyForTab:tab]]){captured=YES;NSString *key=[self keyForTab:tab];NSString *title=[tab[@"title"] length]?tab[@"title"]:tab[@"host"];NSDictionary *p=@{@"key":key,@"name":[@"↗ " stringByAppendingString:title?:@"Chrome 탭"],@"ids":@[],@"bundles":@[],@"active":tab[@"active"]?:@NO,@"isBrowserTab":@YES,@"canVolume":@([tab[@"captured"] boolValue]),@"tabId":tab[@"id"],@"session":tab[@"session"],@"peak":tab[@"peak"]?:@0,@"fullTitle":title?:@"Chrome 탭"};[processes insertObject:p atIndex:0];}
-    if(captured){NSIndexSet *chrome=[processes indexesOfObjectsPassingTest:^BOOL(NSDictionary *p,NSUInteger idx,BOOL *stop){(void)idx;(void)stop;return [p[@"key"] isEqual:@"com.google.Chrome"];}];[processes removeObjectsAtIndexes:chrome];BOOL cleared=NO;for(int i=1;i<6;i++)if([_assignments[i] isEqual:@"com.google.Chrome"]){_assignments[i]=@"";[self clearPickupForSlot:i];cleared=YES;}if(cleared){_canvas.message=@"Chrome 오디오 탭을 감지해 Chrome 전체 배정을 해제했습니다. 음소거는 바로, 음량·EQ는 탭에서 ⌘⇧6으로 연결합니다.";[self saveSettings];}}
+    for(NSDictionary *tab in _browser.tabs)if([tab[@"captured"] boolValue]||[tab[@"active"] boolValue]||[_assignments containsObject:[self keyForTab:tab]]){captured=YES;NSString *key=[self keyForTab:tab];NSString *title=[tab[@"title"] length]?tab[@"title"]:tab[@"host"];NSDictionary *p=@{@"key":key,@"name":[@"↗ " stringByAppendingString:title?:TXL(@"Chrome 탭")],@"ids":@[],@"bundles":@[],@"active":tab[@"active"]?:@NO,@"isBrowserTab":@YES,@"canVolume":@([tab[@"captured"] boolValue]),@"tabId":tab[@"id"],@"session":tab[@"session"],@"peak":tab[@"peak"]?:@0,@"fullTitle":title?:TXL(@"Chrome 탭")};[processes insertObject:p atIndex:0];}
+    if(captured){NSIndexSet *chrome=[processes indexesOfObjectsPassingTest:^BOOL(NSDictionary *p,NSUInteger idx,BOOL *stop){return [p[@"key"] isEqual:@"com.google.Chrome"];}];[processes removeObjectsAtIndexes:chrome];}
     _processes=processes;[self autoMatch];
+    [self refreshDeviceMenus];
+}
+- (void)refreshDeviceMenus {
     NSString *outSig=[NSString stringWithFormat:@"%@|%@",_outputs,_outputUID];BOOL outputChanged=![_outputMenuSignature isEqual:outSig];_outputMenuSignature=outSig;
     NSMutableArray *processMenu=[NSMutableArray array];for(NSDictionary *p in _processes)[processMenu addObject:@[p[@"key"],p[@"name"]]];NSString *processSig=[NSString stringWithFormat:@"%@|%@",processMenu,_assignments];BOOL processesChanged=![_processMenuSignature isEqual:processSig];_processMenuSignature=processSig;
     if(outputChanged){[_outputMenu removeAllItems];for(NSDictionary *d in _outputs){[_outputMenu addItemWithTitle:[NSString stringWithFormat:@"%@  ·  %@ ch",d[@"name"],d[@"channels"]]];_outputMenu.lastItem.representedObject=d[@"uid"];if([d[@"uid"] isEqual:_outputUID])[_outputMenu selectItem:_outputMenu.lastItem];}
     BOOL found=NO;for(NSDictionary *d in _outputs)if([d[@"uid"] isEqual:_outputUID])found=YES;
-    if(!found){[_outputMenu addItemWithTitle:@"선택한 출력 장치가 연결되지 않음"];_outputMenu.lastItem.representedObject=_outputUID;[_outputMenu selectItem:_outputMenu.lastItem];}}
+    if(!found){[_outputMenu addItemWithTitle:TXL(@"선택한 출력 장치가 연결되지 않음")];_outputMenu.lastItem.representedObject=_outputUID;[_outputMenu selectItem:_outputMenu.lastItem];}}
     if(processesChanged)for(int i=0;i<6;i++){
-        TXChannel *c=_channels[i];[c.assignment removeAllItems];[c.assignment addItemWithTitle:_autoAssign?@"재생 앱 대기…":@"앱 지정…"];c.assignment.lastItem.representedObject=@"";BOOL present=!_assignments[i].length;
+        TXChannel *c=_channels[i];[c.assignment removeAllItems];[c.assignment addItemWithTitle:_autoAssign?TXL(@"재생 앱 대기…"):TXL(@"앱 지정…")];c.assignment.lastItem.representedObject=@"";BOOL present=!_assignments[i].length;
         for(NSDictionary *p in _processes){NSString *key=p[@"key"];if(![p[@"isSystemSound"] boolValue]&&![self isAutomaticCandidate:p]&&![key isEqual:_assignments[i]])continue;BOOL used=NO;for(int j=0;j<6;j++)if(j!=i&&[_assignments[j] isEqual:key])used=YES;if(used)continue;
-            [c.assignment addItemWithTitle:p[@"name"]];c.assignment.lastItem.representedObject=key;if([key isEqual:_assignments[i]]){[c.assignment selectItem:c.assignment.lastItem];present=YES;}}
-        c.assignment.toolTip=@"실행 중인 앱 또는 연결된 Chrome 탭을 지정합니다.";for(NSDictionary *p in _processes)if([p[@"key"] isEqual:_assignments[i]])c.assignment.toolTip=p[@"fullTitle"]?:p[@"name"];
-        if(!present){[c.assignment addItemWithTitle:i==0?@"시스템 사운드":[NSString stringWithFormat:@"%@ (대기)",[self nameForKey:_assignments[i]]]];c.assignment.lastItem.representedObject=_assignments[i];[c.assignment selectItem:c.assignment.lastItem];}
+            [c.assignment addItemWithTitle:[key isEqual:@"local.tx6mac.system-sounds"]?[self nameForKey:key]:p[@"name"]];c.assignment.lastItem.representedObject=key;if([key isEqual:_assignments[i]]){[c.assignment selectItem:c.assignment.lastItem];present=YES;}}
+        c.assignment.toolTip=TXL(@"실행 중인 앱 또는 연결된 Chrome 탭을 지정합니다.");for(NSDictionary *p in _processes)if([p[@"key"] isEqual:_assignments[i]])c.assignment.toolTip=p[@"fullTitle"]?:p[@"name"];
+        if(!present){[c.assignment addItemWithTitle:i==0?TXL(@"시스템 사운드"):[NSString stringWithFormat:TXL(@"%@ (대기)"),[self nameForKey:_assignments[i]]]];c.assignment.lastItem.representedObject=_assignments[i];[c.assignment selectItem:c.assignment.lastItem];}
     }
-    for(int i=0;i<6;i++){TXChannel *c=_channels[i];BOOL available=[self canAdjustVolumeForSlot:i];c.fader.enabled=available;c.fader.needsDisplay=YES;for(TXKnob *knob in c.knobs){knob.enabled=available;knob.needsDisplay=YES;}if(!available){c.fader.toolTip=@"음소거는 바로 조절됩니다. 개별 음량·EQ는 해당 Chrome 탭에서 ⌘⇧6으로 연결하세요.";for(TXKnob *knob in c.knobs)knob.toolTip=c.fader.toolTip;}else{c.fader.toolTip=@"음량을 드래그하거나 스크롤하여 조절합니다.";for(TXKnob *knob in c.knobs)knob.toolTip=@"위아래 드래그 또는 스크롤. 두 번 클릭하면 0 dB. Shift로 미세 조절.";}}
+    for(int i=0;i<6;i++){TXChannel *c=_channels[i];BOOL available=[self canAdjustVolumeForSlot:i];c.fader.enabled=available;c.fader.needsDisplay=YES;for(TXKnob *knob in c.knobs){knob.enabled=available;knob.needsDisplay=YES;}if(!available){c.fader.toolTip=TXL(@"음소거는 바로 조절됩니다. 개별 음량·EQ는 해당 Chrome 탭에서 ⌘⇧6으로 연결하세요.");for(TXKnob *knob in c.knobs)knob.toolTip=c.fader.toolTip;}else{c.fader.toolTip=TXL(@"음량을 드래그하거나 스크롤하여 조절합니다.");for(TXKnob *knob in c.knobs)knob.toolTip=TXL(@"위아래 드래그 또는 스크롤. 두 번 클릭하면 0 dB. Shift로 미세 조절.");}}
 }
 - (NSString*)keyForTab:(NSDictionary*)tab {return [NSString stringWithFormat:@"chrome-tab:%@:%@",tab[@"session"],tab[@"id"]];}
 - (void)browserChanged {
     [self refreshDevices];if(_desiredRunning&&![_signature isEqual:[self currentSignature]])[self rebuildAudio];[self updateStatus];[self writeStatus];
 }
 - (void)sendBrowserControls {
-    if(!_browser)return;NSMutableArray *controls=[NSMutableArray array];TXRenderState *s=_audio.state;
+    if(!_browser)return;if(_lastBrowserSend&&[NSDate.date timeIntervalSinceDate:_lastBrowserSend]<0.05){[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(sendBrowserControls) object:nil];[self performSelector:@selector(sendBrowserControls) withObject:nil afterDelay:0.05 inModes:@[NSRunLoopCommonModes]];return;}NSMutableArray *controls=[NSMutableArray array];TXRenderState *s=_audio.state;
     for(NSDictionary *tab in _browser.tabs){NSString *key=[self keyForTab:tab];NSUInteger slot=[_assignments indexOfObject:key];BOOL mapped=slot!=NSNotFound&&slot<6;
         [controls addObject:@{@"tabId":tab[@"id"],@"session":tab[@"session"],@"gain":mapped?@(atomic_load(&s->gain[slot])):@1,@"muted":mapped?@(atomic_load(&s->muted[slot])):@NO,@"eq":mapped?@[@(atomic_load(&s->eq[slot][0])),@(atomic_load(&s->eq[slot][1])),@(atomic_load(&s->eq[slot][2]))]:@[@0,@0,@0]}];
     }
@@ -426,7 +445,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     NSDictionary *process=[self processForSlot:slot];if(slot>=0&&slot<6&&[_assignments[slot] hasPrefix:@"chrome-tab:"])return [process[@"canVolume"] boolValue];return ![process[@"isBrowserTab"] boolValue]||[process[@"canVolume"] boolValue];
 }
 - (void)showBrowserCaptureHint:(NSInteger)slot {
-    _canvas.message=@"Chrome 탭 음소거는 바로 조절됩니다. 개별 음량·EQ는 해당 탭에서 ⌘⇧6을 한 번 눌러 연결하세요.";[self showHUDForSlot:slot message:@"음량·EQ 연결: ⌘⇧6"];_canvas.needsDisplay=YES;
+    _canvas.message=TXL(@"Chrome 탭 음소거는 바로 조절됩니다. 개별 음량·EQ는 해당 탭에서 ⌘⇧6을 한 번 눌러 연결하세요.");[self showHUDForSlot:slot message:TXL(@"음량·EQ 연결: ⌘⇧6")];_canvas.needsDisplay=YES;
 }
 - (BOOL)isAutomaticCandidate:(NSDictionary*)process {
     NSString *key=process[@"key"];if([process[@"isBrowserTab"] boolValue])return YES;if([process[@"isSystemSound"] boolValue]||[key isEqual:@"local.tx6mac.system-sounds"])return NO;if(!key.length||[key hasPrefix:@"pid:"]||[key isEqual:NSBundle.mainBundle.bundleIdentifier])return NO;
@@ -438,23 +457,17 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     _channels[slot].fader.awaitingPickup=_pickup;for(TXKnob *knob in _channels[slot].knobs)knob.awaitingPickup=_pickup;
 }
 - (void)autoMatch {
-    NSDate *now=NSDate.date;NSMutableArray<NSString*> *active=[NSMutableArray array];
-    for(NSDictionary *p in _processes)if([p[@"active"] boolValue]&&[self isAutomaticCandidate:p]){NSString *key=p[@"key"];[active addObject:key];_lastActive[key]=now;[_observedActive addObject:key];}
-    _overflowCount=MAX(0,(NSInteger)active.count-5);if(!_autoAssign)return;
-    NSArray *previous=[_assignments copy];NSDictionary *snapshots=TXSnapshotAssignments(previous,_audio.state);NSMutableArray<NSString*> *next=[previous mutableCopy];
-    for(NSString *key in next)if(key.length&&!_lastActive[key])_lastActive[key]=now;
-    for(NSString *key in active){if([next containsObject:key])continue;NSInteger candidate=NSNotFound;
-        for(int i=1;i<6;i++)if(!next[i].length){candidate=i;break;}
-        if(candidate==NSNotFound){NSTimeInterval longest=12;for(int i=1;i<6;i++){NSString *old=next[i];if([active containsObject:old])continue;NSTimeInterval age=[now timeIntervalSinceDate:_lastActive[old]?:now];if(age>=longest){candidate=i;longest=age;}}}
-        if(candidate!=NSNotFound)next[candidate]=key;
-    }
-    next=[TXOrderedAssignments(next,[NSSet setWithArray:active],_lastActive,_observedActive,now) mutableCopy];
-    if([next isEqual:previous])return;
-    // 이전 오디오 경로에 새 트랙의 설정이 잠시 적용되는 것을 막습니다.
-    if(_audio.running){[_audio stop];_signature=nil;}
-    _assignments=next;TXApplyAssignmentSnapshots(_assignments,snapshots,_audio.state);
-    for(int i=0;i<6;i++){[self clearPickupForSlot:i];TXChannel *c=_channels[i];c.fader.value=atomic_load(&_audio.state->gain[i]);c.mute.state=atomic_load(&_audio.state->muted[i])?NSControlStateValueOn:NSControlStateValueOff;for(int b=0;b<3;b++)c.knobs[2-b].value=atomic_load(&_audio.state->eq[i][b]);}
-    [self saveSettings];
+    NSMutableSet *present=[NSMutableSet set];NSMutableArray *candidates=[NSMutableArray array];
+    for(NSRunningApplication *application in NSWorkspace.sharedWorkspace.runningApplications)if(application.bundleIdentifier.length)[present addObject:application.bundleIdentifier];
+    for(NSDictionary *process in _processes){NSString *key=process[@"key"];if(key.length)[present addObject:key];if(([process[@"active"] boolValue]||([process[@"isBrowserTab"] boolValue]&&[process[@"canVolume"] boolValue]))&&[self isAutomaticCandidate:process])[candidates addObject:key];}
+    if(!_browser.connected&&[present containsObject:@"com.google.Chrome"])for(NSString *key in _assignments)if([key hasPrefix:@"chrome-tab:"])[present addObject:key];
+    NSInteger unassigned=0,empty=0;for(int i=1;i<6;i++)if(![_assignments[i] length])empty++;for(NSString *key in candidates)if(![_assignments containsObject:key])unassigned++;_overflowCount=MAX(0,unassigned-empty);
+    NSArray *previous=[_assignments copy];NSArray *next=TXStableAssignments(previous,present,candidates,_autoAssign);if([next isEqual:previous])return;
+    // 배정만 바꾸며 물리 채널 gain/EQ/mute 및 픽업은 변경하지 않습니다.
+    if(_audio.running){[_audio stop];_signature=nil;}_assignments=[next mutableCopy];[self saveSettings];
+}
+- (void)autoStartChanged:(NSButton*)sender {
+    _autoStart=sender.state==NSControlStateValueOn;if(_autoStart){_explicitStop=NO;_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;if(_audioStartConsent){_desiredRunning=YES;[self rebuildAudio];}else [self showSetup:nil];}else _retryAt=nil;[self saveSettings];[self updateStatus];[self writeStatusNow];
 }
 - (void)autoChanged:(NSButton*)sender {
     _autoAssign=sender.state==NSControlStateValueOn;[self refreshDevices];[self saveSettings];if(_desiredRunning&&![_signature isEqual:[self currentSignature]])[self rebuildAudio];[self updateStatus];
@@ -467,46 +480,56 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     NSDictionary *d=[self selectedOutput];double rate=0;if(d){AudioObjectPropertyAddress a={kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};UInt32 size=sizeof(rate);AudioObjectGetPropertyData([d[@"id"] unsignedIntValue],&a,0,NULL,&size,&rate);}
     return [NSString stringWithFormat:@"%@|%.0f|%@",_outputUID,rate,[self currentGroups]];
 }
+- (void)scheduleRecovery {
+    if(!_desiredRunning||_explicitStop||_sleeping||_retryAt)return;if(!TXMayAutoStart(_autoStart,_audioStartConsent,_explicitStop,_sleeping)){_retryExhausted=YES;return;}
+    NSTimeInterval delay=TXRetryDelay(_retryAttempt);if(delay>0){_retryAt=[NSDate dateWithTimeIntervalSinceNow:delay];_retryAttempt++;}else _retryExhausted=YES;
+}
 - (void)rebuildAudio {
-    if(!_desiredRunning||_isBuilding)return;NSDictionary *device=[self selectedOutput];if(!device){[_audio stop];_desiredRunning=NO;_audio.lastError=@"출력 장치 연결이 해제되어 믹서를 중지하고 원음을 복구했습니다.";_canvas.message=_audio.lastError;[self updateStatus];return;}
+    if(!_desiredRunning||_isBuilding||_sleeping||_explicitStop||_retryAt||(!_audio.running&&_retryExhausted))return;
+    NSDictionary *device=[self selectedOutput];if(!device){[_audio stop];_audio.lastError=TXL(@"출력 장치 연결이 해제되어 믹서를 중지하고 원음을 복구했습니다.");_canvas.message=_audio.lastError;[self scheduleRecovery];[self updateStatus];[self writeStatusNow];return;}
     _isBuilding=YES;NSString *signature=[self currentSignature];BOOL ok=[_audio startOnDevice:[device[@"id"] unsignedIntValue] groups:[self currentGroups]];_isBuilding=NO;
-    if(ok){_startedAt=NSDate.date;_progressAt=NSDate.date;_progressFrames=0;_signature=signature;_canvas.message=@"믹서 실행 중 · 앱별 음량과 EQ가 선택한 출력에 적용됩니다.";}else{_desiredRunning=NO;_canvas.message=_audio.lastError;}_startButton.title=_deviceContext.suspended||_deviceContext.shiftDown?@"TX-6 제어 재개":(_desiredRunning?@"믹서 중지":@"믹서 시작");[self sendBrowserControls];[self updateStatus];
+    if(ok){_startedAt=NSDate.date;_progressAt=NSDate.date;_progressFrames=0;_signature=signature;_canvas.message=TXL(@"믹서 실행 중 · 앱별 음량과 EQ가 선택한 출력에 적용됩니다.");}else{_canvas.message=_audio.lastError;[self scheduleRecovery];}[self sendBrowserControls];[self updateStatus];[self writeStatusNow];
 }
 - (void)toggleMixer:(id)sender {
-    _desiredRunning=!_desiredRunning;if(_desiredRunning){[self refreshDevices];[self rebuildAudio];}else{[_audio stop];_audio.lastError=@"";_canvas.message=@"믹서 중지 · 프로그램의 원래 출력이 복구되었습니다.";}[self sendBrowserControls];[self updateStatus];
+    if(_desiredRunning){_explicitStop=YES;_desiredRunning=NO;_retryAt=nil;[_audio stop];_audio.lastError=@"";_canvas.message=TXL(@"믹서 중지 · 프로그램의 원래 출력이 복구되었습니다.");}
+    else{_explicitStop=NO;_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;_desiredRunning=YES;_audioStartConsent=YES;[[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"TX6Mac.audioStartConsent"];[[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"TX6Mac.setupSeen"];[self refreshDevices];[self saveSettings];[self rebuildAudio];}[self sendBrowserControls];[self updateStatus];[self writeStatusNow];
 }
 - (void)poll:(id)sender {
-    [self refreshDevices];[_midi refresh];if(_desiredRunning&&![_signature isEqual:[self currentSignature]])[self rebuildAudio];[self updateStatus];[self writeStatus];
+    BOOL hadOutput=[self selectedOutput]!=nil;[self refreshDevices];[_midi refresh];
+    if(!hadOutput&&[self selectedOutput]&&_desiredRunning&&!_explicitStop){_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;}
+    if(_desiredRunning&&(!_audio.running||![_signature isEqual:[self currentSignature]])&&!_retryAt&&(_audio.running||(_retryAttempt==0&&!_retryExhausted)))[self rebuildAudio];[self updateStatus];[self writeStatus];
 }
 - (void)tick:(id)sender {
-    TXRenderState *s=_audio.state;if(!_lastBrowserSend||[NSDate.date timeIntervalSinceDate:_lastBrowserSend]>=1)[self sendBrowserControls];
-    if(_audio.running){uint64_t frames=atomic_load(&s->frames);if(frames!=_progressFrames){_progressFrames=frames;_progressAt=NSDate.date;}BOOL active=NO;for(NSDictionary *p in _processes)if([p[@"active"] boolValue])active=YES;NSTimeInterval timeout=frames?6:10;if(active&&_progressAt&&[NSDate.date timeIntervalSinceDate:_progressAt]>timeout){[_audio stop];_desiredRunning=NO;_audio.lastError=@"오디오 처리 응답이 없어 원음을 복구했습니다. 시스템 오디오 권한과 출력 장치를 확인해 주세요.";_canvas.message=_audio.lastError;[self updateStatus];}}
-    int fault=atomic_load(&s->layoutFault);if(_audio.running&&fault){[_audio stop];_desiredRunning=NO;_audio.lastError=[NSString stringWithFormat:@"오디오 채널 구조가 변경되어 원음을 복구했습니다. 다시 시작해 주세요. (%d)",fault];_canvas.message=_audio.lastError;[self updateStatus];}
-    for(int i=0;i<6;i++){TXChannel *c=_channels[i];float peak=_audio.running?atomic_load(&s->peak[i]):0;for(NSDictionary *tab in _browser.tabs)if([[self keyForTab:tab] isEqual:_assignments[i]])peak=_audio.running&&!atomic_load(&s->muted[i])?[tab[@"peak"] floatValue]*atomic_load(&s->gain[i]):0;c.fader.muted=atomic_load(&s->muted[i]);c.fader.peak=MAX(peak,c.fader.peak*0.82);c.fader.needsDisplay=YES;BOOL active=NO;for(NSDictionary *p in _processes)if([p[@"key"] isEqual:_assignments[i]])active=[p[@"active"] boolValue];c.activity.stringValue=![self canAdjustVolumeForSlot:i]?@"음소거 가능 · 연결 필요":(i==0?@"시스템 효과음 · 고정":(_assignments[i].length?(active?@"오디오 활성":@"소리 재생 대기"):(_autoAssign?@"재생 앱 대기":@"미지정")));}
+    if(_retryAt&&[_retryAt timeIntervalSinceNow]<=0){_retryAt=nil;[self rebuildAudio];}
+    [self updateSetupStatus];TXRenderState *s=_audio.state;if(!_lastBrowserSend||[NSDate.date timeIntervalSinceDate:_lastBrowserSend]>=1)[self sendBrowserControls];
+    if(_audio.running){uint64_t frames=atomic_load(&s->frames);if(frames!=_progressFrames){_progressFrames=frames;_progressAt=NSDate.date;_retryAttempt=0;_retryExhausted=NO;}BOOL active=NO;for(NSDictionary *p in _processes)if([p[@"active"] boolValue])active=YES;NSTimeInterval timeout=frames?6:10;if(active&&_progressAt&&[NSDate.date timeIntervalSinceDate:_progressAt]>timeout){[_audio stop];[self scheduleRecovery];_audio.lastError=TXL(@"오디오 처리 응답이 없어 원음을 복구했습니다. 시스템 오디오 권한과 출력 장치를 확인해 주세요.");_canvas.message=_audio.lastError;[self updateStatus];}}
+    int fault=atomic_load(&s->layoutFault);if(_audio.running&&fault){[_audio stop];[self scheduleRecovery];_audio.lastError=[NSString stringWithFormat:TXL(@"오디오 채널 구조가 변경되어 원음을 복구했습니다. 다시 시작해 주세요. (%d)"),fault];_canvas.message=_audio.lastError;[self updateStatus];}
+    for(int i=0;i<6;i++){TXChannel *c=_channels[i];float peak=_audio.running?atomic_load(&s->peak[i]):0;for(NSDictionary *tab in _browser.tabs)if([[self keyForTab:tab] isEqual:_assignments[i]])peak=_audio.running&&!atomic_load(&s->muted[i])?[tab[@"peak"] floatValue]*atomic_load(&s->gain[i]):0;c.fader.muted=atomic_load(&s->muted[i]);c.fader.peak=MAX(peak,c.fader.peak*0.82);c.fader.needsDisplay=YES;BOOL active=NO;for(NSDictionary *p in _processes)if([p[@"key"] isEqual:_assignments[i]])active=[p[@"active"] boolValue];c.activity.stringValue=![self canAdjustVolumeForSlot:i]?TXL(@"음소거 가능 · 연결 필요"):(i==0?TXL(@"시스템 효과음 · 고정"):(_assignments[i].length?(active?TXL(@"오디오 활성"):TXL(@"소리 재생 대기")):(_autoAssign?TXL(@"재생 앱 대기"):TXL(@"미지정"))));}
     uint64_t limited=atomic_load(&s->limitedFrames);if(limited>_lastLimitedFrames)_lastLimitDate=NSDate.date;_lastLimitedFrames=limited;_canvas.limited=_lastLimitDate&&[NSDate.date timeIntervalSinceDate:_lastLimitDate]<1;_canvas.needsDisplay=YES;
     _masterFader.peak=MAX(_audio.running?atomic_load(&s->outputPeak):0,_masterFader.peak*0.82);_masterFader.needsDisplay=YES;
 }
 - (void)updateStatus {
     TXRenderState *s=_audio.state;_canvas.running=_audio.running&&atomic_load(&s->callbacks)>0;_canvas.audioWaiting=_audio.running&&atomic_load(&s->callbacks)==0;_canvas.master=atomic_load(&s->master);_canvas.muted=atomic_load(&s->masterMuted);
-    _canvas.connection=_deviceContext.suspended||_deviceContext.shiftDown?(_deviceContext.reason?@"TX-6 MENU / PAUSED":@"TX-6 HOME CHECK"):(_midi.sources.count?[_midi.sources componentsJoinedByString:@" / "]:@"MIDI 연결 대기");_canvas.output=[self selectedOutput][@"name"]?:@"출력 장치 연결 대기";_canvas.needsDisplay=YES;
-    _browserLabel.stringValue=_browser.connected?@"Chrome 오디오 탭 자동 감지 · 음소거 바로 가능\n개별 음량·EQ는 해당 탭에서 ⌘⇧6으로 연결":@"Chrome 확장을 연결하면 재생 탭 자동 감지\n개별 음량·EQ 연결 단축키: ⌘⇧6";_remainderLabel.stringValue=_overflowCount>0?[NSString stringWithFormat:@"추가 %ld개 앱은 MASTER 적용",(long)_overflowCount]:@"미지정 앱도 MASTER 적용";_masterFader.value=atomic_load(&s->master);_masterMute.state=atomic_load(&s->masterMuted)?NSControlStateValueOn:NSControlStateValueOff;_startButton.title=_deviceContext.suspended||_deviceContext.shiftDown?@"TX-6 제어 재개":(_desiredRunning?@"믹서 중지":@"믹서 시작");
-    _resumeDeviceButton.enabled=_deviceContext.suspended||_deviceContext.shiftDown;_deviceContextLabel.stringValue=_deviceContext.suspended||_deviceContext.shiftDown?(_deviceContext.reason?@"기기 메뉴 조작 중 · 맥 제어 일시정지\nSHIFT를 단독으로 눌렀다 떼면 홈 제어 재개":@"기기 홈 화면 확인 필요 · 맥 제어 일시정지\nSHIFT를 단독으로 눌렀다 떼면 홈 제어 재개"):@"TX-6 홈 화면 제어 중\n메뉴 진입 신호가 오면 맥 조절을 보호합니다.";
-    _statusItem.button.toolTip=[NSString stringWithFormat:@"TX · MAC · %@ · %.0f%%",_audio.running?@"실행":@"대기",atomic_load(&s->master)*100];
+    _canvas.connection=_deviceContext.suspended||_deviceContext.shiftDown?(_deviceContext.reason?@"TX-6 MENU / PAUSED":@"TX-6 HOME CHECK"):(_midi.sources.count?[_midi.sources componentsJoinedByString:@" / "]:TXL(@"MIDI 연결 대기"));_canvas.output=[self selectedOutput][@"name"]?:TXL(@"출력 장치 연결 대기");_canvas.needsDisplay=YES;
+    _browserLabel.stringValue=_browser.connected?TXL(@"Chrome 오디오 탭 자동 감지 · 음소거 바로 가능\n개별 음량·EQ는 해당 탭에서 ⌘⇧6으로 연결"):TXL(@"Chrome 확장을 연결하면 재생 탭 자동 감지\n개별 음량·EQ 연결 단축키: ⌘⇧6");_remainderLabel.stringValue=_overflowCount>0?[NSString stringWithFormat:TXL(@"추가 %ld개 앱은 MASTER 적용"),(long)_overflowCount]:TXL(@"미지정 앱도 MASTER 적용");_masterFader.value=atomic_load(&s->master);_masterMute.state=atomic_load(&s->masterMuted)?NSControlStateValueOn:NSControlStateValueOff;_startButton.title=_deviceContext.suspended||_deviceContext.shiftDown?TXL(@"TX-6 제어 재개"):(_desiredRunning?TXL(@"믹서 중지"):TXL(@"믹서 시작"));
+    _resumeDeviceButton.enabled=_deviceContext.suspended||_deviceContext.shiftDown;_deviceContextLabel.stringValue=_deviceContext.suspended||_deviceContext.shiftDown?(_deviceContext.reason?TXL(@"기기 메뉴 조작 중 · 맥 제어 일시정지\nSHIFT를 단독으로 눌렀다 떼면 홈 제어 재개"):TXL(@"기기 홈 화면 확인 필요 · 맥 제어 일시정지\nSHIFT를 단독으로 눌렀다 떼면 홈 제어 재개")):TXL(@"TX-6 홈 화면 제어 중\n메뉴 진입 신호가 오면 맥 조절을 보호합니다.");
+    _statusItem.button.toolTip=[NSString stringWithFormat:@"TX · MAC · %@ · %.0f%%",_audio.running?TXL(@"실행"):TXL(@"대기"),atomic_load(&s->master)*100];
 }
+- (void)writeStatusNow {_lastStatusWrite=nil;[self writeStatus];}
 - (void)writeStatus {
-    if(!_statusFile.length)return;NSMutableArray *channels=[NSMutableArray array];TXRenderState *s=_audio.state;for(int i=0;i<6;i++)[channels addObject:@{@"slot":@(i+1),@"application":_assignments[i],@"gain":@(atomic_load(&s->gain[i])),@"muted":@(atomic_load(&s->muted[i])),@"eqLowMidHigh":@[@(atomic_load(&s->eq[i][0])),@(atomic_load(&s->eq[i][1])),@(atomic_load(&s->eq[i][2]))],@"peak":@(atomic_load(&s->peak[i]))}];
-    NSDictionary *d=@{@"running":@(_audio.running),@"autoAssign":@(_autoAssign),@"controllerSuspended":@(_deviceContext.suspended||_deviceContext.shiftDown),@"controllerShiftHeld":@(_deviceContext.shiftDown),@"controllerContextReasonCC":@(_deviceContext.reason),@"hudEnabled":@(_hudEnabled),@"hudVisible":@(_hud.isVisible),@"hudTitle":_hudView.application?:@"",@"hudMessage":_hudView.message?:@"",@"overflowApps":@(_overflowCount),@"browserConnected":@(_browser.connected),@"browserTabs":_browser.tabs?:@[],@"outputUID":_outputUID?:@"",@"outputName":[self selectedOutput][@"name"]?:@"",@"midiSources":_midi.sources?:@[],@"lastMIDI":_lastMIDI?:@"",@"master":@(atomic_load(&s->master)),@"masterMuted":@(atomic_load(&s->masterMuted)),@"callbacks":@(atomic_load(&s->callbacks)),@"frames":@(atomic_load(&s->frames)),@"limitedFrames":@(atomic_load(&s->limitedFrames)),@"remainderPeak":@(atomic_load(&s->peak[6])),@"outputPeak":@(atomic_load(&s->outputPeak)),@"sampleRate":@(s->sampleRate),@"physicalInputChannels":@(s->physicalInputChannels),@"tapCount":@(s->tapCount),@"layoutFault":@(atomic_load(&s->layoutFault)),@"error":_audio.lastError?:@"",@"channels":channels};
+    if(!_statusFile.length)return;if(_lastStatusWrite&&[NSDate.date timeIntervalSinceDate:_lastStatusWrite]<0.1){[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(writeStatus) object:nil];[self performSelector:@selector(writeStatus) withObject:nil afterDelay:0.1 inModes:@[NSRunLoopCommonModes]];return;}_lastStatusWrite=NSDate.date;NSMutableArray *channels=[NSMutableArray array];TXRenderState *s=_audio.state;for(int i=0;i<6;i++)[channels addObject:@{@"slot":@(i+1),@"application":_assignments[i],@"gain":@(atomic_load(&s->gain[i])),@"muted":@(atomic_load(&s->muted[i])),@"eqLowMidHigh":@[@(atomic_load(&s->eq[i][0])),@(atomic_load(&s->eq[i][1])),@(atomic_load(&s->eq[i][2]))],@"peak":@(atomic_load(&s->peak[i]))}];
+    NSDictionary *d=@{@"language":TXLanguageCode(),@"setupVisible":@(_setupWindow.visible),@"autoStart":@(_autoStart),@"audioStartConsent":@(_audioStartConsent),@"desiredRunning":@(_desiredRunning),@"explicitlyStopped":@(_explicitStop),@"retryAttempt":@(_retryAttempt),@"retryExhausted":@(_retryExhausted),@"retryPending":@(_retryAt!=nil),@"pickup":@(_pickup),@"running":@(_audio.running),@"autoAssign":@(_autoAssign),@"controllerSuspended":@(_deviceContext.suspended||_deviceContext.shiftDown),@"controllerShiftHeld":@(_deviceContext.shiftDown),@"controllerContextReasonCC":@(_deviceContext.reason),@"hudEnabled":@(_hudEnabled),@"hudVisible":@(_hud.isVisible),@"hudTitle":_hudView.application?:@"",@"hudMessage":_hudView.message?:@"",@"overflowApps":@(_overflowCount),@"browserConnected":@(_browser.connected),@"browserTabs":_browser.tabs?:@[],@"outputUID":_outputUID?:@"",@"outputName":[self selectedOutput][@"name"]?:@"",@"midiSources":_midi.sources?:@[],@"midiConnection":_midi.diagnostics?:@{},@"lastMIDI":_lastMIDI?:@"",@"master":@(atomic_load(&s->master)),@"masterMuted":@(atomic_load(&s->masterMuted)),@"callbacks":@(atomic_load(&s->callbacks)),@"frames":@(atomic_load(&s->frames)),@"limitedFrames":@(atomic_load(&s->limitedFrames)),@"remainderPeak":@(atomic_load(&s->peak[6])),@"outputPeak":@(atomic_load(&s->outputPeak)),@"sampleRate":@(s->sampleRate),@"physicalInputChannels":@(s->physicalInputChannels),@"tapCount":@(s->tapCount),@"layoutFault":@(atomic_load(&s->layoutFault)),@"error":_audio.lastError?:@"",@"channels":channels};
     NSData *json=[NSJSONSerialization dataWithJSONObject:d options:NSJSONWritingPrettyPrinted error:nil];[json writeToFile:_statusFile options:NSDataWritingAtomic error:nil];
 }
 - (void)assignmentChanged:(NSPopUpButton*)sender {if(sender.tag==0)return;_autoAssign=NO;_autoButton.state=NSControlStateValueOff;_assignments[sender.tag]=sender.selectedItem.representedObject?:@"";memset(_latched[sender.tag],0,sizeof(_latched[sender.tag]));memset(_havePrevious[sender.tag],0,sizeof(_havePrevious[sender.tag]));[self saveSettings];[self refreshDevices];if(_desiredRunning)[self rebuildAudio];}
-- (void)outputChanged:(NSPopUpButton*)sender {_outputUID=sender.selectedItem.representedObject;[self saveSettings];if(_desiredRunning)[self rebuildAudio];[self updateStatus];}
+- (void)outputChanged:(NSPopUpButton*)sender {if(_desiredRunning){_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;}_outputUID=sender.selectedItem.representedObject;[self saveSettings];if(_desiredRunning)[self rebuildAudio];[self updateStatus];}
 - (void)transportChanged:(NSPopUpButton*)sender {_midi.transport=sender.selectedItem.representedObject;[_midi refresh];[self saveSettings];[self updateStatus];}
 - (void)settingsChanged:(id)sender {BOOL pickup=_pickupButton.state==NSControlStateValueOn,invert=_invertButton.state==NSControlStateValueOn;if(_pickup!=pickup||_invert!=invert){_pickup=pickup;_invert=invert;for(int i=0;i<6;i++)[self clearPickupForSlot:i];}_hudEnabled=_hudButton.state==NSControlStateValueOn;if(!_hudEnabled){_pendingHUD=nil;[self hideHUD:nil];}[self saveSettings];}
 - (void)gainChanged:(TXFader*)sender {int i=(int)sender.tag;if(![self canAdjustVolumeForSlot:i]){sender.value=atomic_load(&_audio.state->gain[i]);[self showBrowserCaptureHint:i];return;}atomic_store(&_audio.state->gain[i],sender.value);_latched[i][0]=NO;sender.awaitingPickup=_pickup;[self showHUDForSlot:i message:[NSString stringWithFormat:@"VOLUME %.0f%%",sender.value*100]];[self saveSettings];}
 - (void)eqChanged:(TXKnob*)sender {int i=(int)sender.tag/3,b=(int)sender.tag%3;if(![self canAdjustVolumeForSlot:i]){sender.value=atomic_load(&_audio.state->eq[i][b]);[self showBrowserCaptureHint:i];return;}atomic_store(&_audio.state->eq[i][b],sender.value);_latched[i][b+1]=NO;sender.awaitingPickup=_pickup;[self showHUDForSlot:i message:[NSString stringWithFormat:@"%@ %+.1f dB",@[@"LOW",@"MID",@"HIGH"][b],sender.value]];[self saveSettings];}
 - (void)masterChanged:(TXFader*)sender {atomic_store(&_audio.state->master,sender.value);[self showHUDForSlot:-1 message:[NSString stringWithFormat:@"VOLUME %.0f%%",sender.value*100]];[self saveSettings];[self updateStatus];}
-- (void)muteChanged:(NSButton*)sender {atomic_store(&_audio.state->muted[sender.tag],sender.state==NSControlStateValueOn);[self showHUDForSlot:sender.tag message:sender.state==NSControlStateValueOn?@"음소거":@"음소거 해제"];[self saveSettings];}
-- (void)masterMuteChanged:(NSButton*)sender {atomic_store(&_audio.state->masterMuted,sender.state==NSControlStateValueOn);[self showHUDForSlot:-1 message:sender.state==NSControlStateValueOn?@"전체 음소거":@"전체 음소거 해제"];[self updateStatus];}
+- (void)muteChanged:(NSButton*)sender {atomic_store(&_audio.state->muted[sender.tag],sender.state==NSControlStateValueOn);[self showHUDForSlot:sender.tag message:sender.state==NSControlStateValueOn?TXL(@"음소거"):TXL(@"음소거 해제")];[self saveSettings];}
+- (void)masterMuteChanged:(NSButton*)sender {atomic_store(&_audio.state->masterMuted,sender.state==NSControlStateValueOn);[self showHUDForSlot:-1 message:sender.state==NSControlStateValueOn?TXL(@"전체 음소거"):TXL(@"전체 음소거 해제")];[self updateStatus];}
 - (void)resetEQ:(id)sender {for(int i=0;i<6;i++)for(int b=0;b<3;b++){atomic_store(&_audio.state->eq[i][b],0);_latched[i][b+1]=NO;_channels[i].knobs[2-b].value=0;_channels[i].knobs[2-b].awaitingPickup=_pickup;}[self showHUDForSlot:-1 message:@"EQ ALL · 0 dB"];[self saveSettings];}
 - (void)menuSliderChanged:(NSSlider*)sender {
     int slot=(int)sender.tag/10,b=(int)sender.tag%10-1;if(slot<6&&![self canAdjustVolumeForSlot:slot]){[self showBrowserCaptureHint:slot];return;}
@@ -515,26 +538,27 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     else {atomic_store(&_audio.state->eq[slot][b],sender.doubleValue);_channels[slot].knobs[2-b].value=sender.doubleValue;_latched[slot][b+1]=NO;_channels[slot].knobs[2-b].awaitingPickup=_pickup;}
     NSTextField *label=[sender.superview viewWithTag:999];label.stringValue=b<0?[NSString stringWithFormat:@"%.0f%%",sender.doubleValue*100]:[NSString stringWithFormat:@"%+.0f",sender.doubleValue];[self showHUDForSlot:slot==6?-1:slot message:b<0?[NSString stringWithFormat:@"VOLUME %.0f%%",sender.doubleValue*100]:[NSString stringWithFormat:@"%@ %+.1f dB",@[@"LOW",@"MID",@"HIGH"][b],sender.doubleValue]];[self saveSettings];
 }
-- (void)menuMute:(NSMenuItem*)sender {int slot=(int)sender.tag;BOOL mute=!atomic_load(&_audio.state->muted[slot]);atomic_store(&_audio.state->muted[slot],mute);_channels[slot].mute.state=mute?NSControlStateValueOn:NSControlStateValueOff;sender.state=_channels[slot].mute.state;[self showHUDForSlot:slot message:mute?@"음소거":@"음소거 해제"];[self saveSettings];}
-- (void)masterMenuMute:(NSMenuItem*)sender {atomic_store(&_audio.state->masterMuted,!atomic_load(&_audio.state->masterMuted));sender.state=atomic_load(&_audio.state->masterMuted)?NSControlStateValueOn:NSControlStateValueOff;[self showHUDForSlot:-1 message:atomic_load(&_audio.state->masterMuted)?@"전체 음소거":@"전체 음소거 해제"];[self updateStatus];}
-- (void)menuOutput:(NSMenuItem*)sender {_outputUID=sender.representedObject;[self refreshDevices];[self saveSettings];if(_desiredRunning)[self rebuildAudio];[self updateStatus];}
+- (void)menuMute:(NSMenuItem*)sender {int slot=(int)sender.tag;BOOL mute=!atomic_load(&_audio.state->muted[slot]);atomic_store(&_audio.state->muted[slot],mute);_channels[slot].mute.state=mute?NSControlStateValueOn:NSControlStateValueOff;sender.state=_channels[slot].mute.state;[self showHUDForSlot:slot message:mute?TXL(@"음소거"):TXL(@"음소거 해제")];[self saveSettings];}
+- (void)masterMenuMute:(NSMenuItem*)sender {atomic_store(&_audio.state->masterMuted,!atomic_load(&_audio.state->masterMuted));sender.state=atomic_load(&_audio.state->masterMuted)?NSControlStateValueOn:NSControlStateValueOff;[self showHUDForSlot:-1 message:atomic_load(&_audio.state->masterMuted)?TXL(@"전체 음소거"):TXL(@"전체 음소거 해제")];[self updateStatus];}
+- (void)menuOutput:(NSMenuItem*)sender {if(_desiredRunning){_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;}_outputUID=sender.representedObject;[self refreshDevices];[self saveSettings];if(_desiredRunning)[self rebuildAudio];[self updateStatus];}
 - (void)deviceConnectionChanged {
-    _deviceContext=(TXDeviceContext){.suspended=YES};_canvas.message=@"TX-6 화면을 확인해 주세요. SHIFT를 단독으로 누르고 떼면 홈 제어를 재개합니다.";[self updateStatus];[self writeStatus];
+    if(_midi.sources.count&&TXMayAutoStart(_autoStart,_audioStartConsent,_explicitStop,_sleeping)&&!_audio.running){_desiredRunning=YES;_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;[self rebuildAudio];}
+    _deviceContext=(TXDeviceContext){.suspended=YES};_canvas.message=TXL(@"TX-6 화면을 확인해 주세요. SHIFT를 단독으로 누르고 떼면 홈 제어를 재개합니다.");[self updateStatus];[self writeStatus];
 }
 - (void)primaryControl:(id)sender {if(_deviceContext.suspended||_deviceContext.shiftDown)[self resumeDeviceControls:sender];else [self toggleMixer:sender];}
 - (void)resumeDeviceControls:(id)sender {
-    _deviceContext=(TXDeviceContext){0};for(int i=0;i<6;i++)[self clearPickupForSlot:i];_canvas.message=@"TX-6 홈 화면 제어를 재개했습니다. 페이더와 노브는 현재 맥 값에서 픽업합니다.";[self showHUDForSlot:-1 message:@"TX-6 제어 재개"];[self updateStatus];[self writeStatus];
+    _deviceContext=(TXDeviceContext){0};for(int i=0;i<6;i++)[self clearPickupForSlot:i];_canvas.message=TXL(@"TX-6 홈 화면 제어를 재개했습니다. 페이더와 노브는 현재 맥 값에서 픽업합니다.");[self showHUDForSlot:-1 message:TXL(@"TX-6 제어 재개")];[self updateStatus];[self writeStatus];
 }
 - (void)calibrateMaster:(id)sender {
     NSString *text=[_calibrationInput.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];NSScanner *scanner=[NSScanner scannerWithString:text];double number=0;
-    if(![scanner scanDouble:&number]||!scanner.isAtEnd||!isfinite(number)||number<0||number>100){_canvas.message=@"TX-6에 표시된 현재 메인 숫자 0~100을 입력해 주세요.";[self showHUDForSlot:-1 message:@"0~100 숫자 입력"];_canvas.needsDisplay=YES;return;}
-    atomic_store(&_audio.state->master,number/100);_canvas.message=@"입력한 기기 숫자에 맥 전체 음량을 맞췄습니다. 자동 조회나 상시 동기화는 아닙니다.";[self showHUDForSlot:-1 message:[NSString stringWithFormat:@"VOLUME %.0f%%",number]];[self saveSettings];[self updateStatus];[self writeStatus];
+    if(![scanner scanDouble:&number]||!scanner.isAtEnd||!isfinite(number)||number<0||number>100){_canvas.message=TXL(@"TX-6에 표시된 현재 메인 숫자 0~100을 입력해 주세요.");[self showHUDForSlot:-1 message:TXL(@"0~100 숫자 입력")];_canvas.needsDisplay=YES;return;}
+    atomic_store(&_audio.state->master,number/100);_canvas.message=TXL(@"입력한 기기 숫자에 맥 전체 음량을 맞췄습니다. 자동 조회나 상시 동기화는 아닙니다.");[self showHUDForSlot:-1 message:[NSString stringWithFormat:@"VOLUME %.0f%%",number]];[self saveSettings];[self updateStatus];[self writeStatus];
 }
 - (BOOL)consumeDeviceContextCC:(UInt8)cc value:(UInt8)value {
     BOOL wasBlocked=_deviceContext.suspended||_deviceContext.shiftDown;BOOL suppress=TXConsumeDeviceContext(&_deviceContext,cc,value);BOOL blocked=_deviceContext.suspended||_deviceContext.shiftDown;
     if(!suppress)return NO;
-    if(wasBlocked&&!blocked){for(int i=0;i<6;i++)[self clearPickupForSlot:i];_canvas.message=@"SHIFT 단독 홈 복귀를 확인해 TX-6의 맥 제어를 재개했습니다.";[self showHUDForSlot:-1 message:@"TX-6 제어 재개"];}
-    else if(blocked){_canvas.message=_deviceContext.reason?@"기기 메뉴 조작 중 · 맥 제어 일시정지. SHIFT를 단독으로 누르고 떼면 홈 제어를 재개합니다.":@"기기 홈 화면 확인 필요 · 맥 제어 일시정지. SHIFT를 단독으로 누르고 떼면 홈 제어를 재개합니다.";[self showHUDForSlot:-1 message:_deviceContext.reason?@"기기 메뉴 · 제어 정지":@"홈 확인 · 제어 정지"];}
+    if(wasBlocked&&!blocked){for(int i=0;i<6;i++)[self clearPickupForSlot:i];_canvas.message=TXL(@"SHIFT 단독 홈 복귀를 확인해 TX-6의 맥 제어를 재개했습니다.");[self showHUDForSlot:-1 message:TXL(@"TX-6 제어 재개")];}
+    else if(blocked){_canvas.message=_deviceContext.reason?TXL(@"기기 메뉴 조작 중 · 맥 제어 일시정지. SHIFT를 단독으로 누르고 떼면 홈 제어를 재개합니다."):TXL(@"기기 홈 화면 확인 필요 · 맥 제어 일시정지. SHIFT를 단독으로 누르고 떼면 홈 제어를 재개합니다.");[self showHUDForSlot:-1 message:_deviceContext.reason?TXL(@"기기 메뉴 · 제어 정지"):TXL(@"홈 확인 · 제어 정지")];}
     [self updateStatus];[self writeStatus];return YES;
 }
 - (BOOL)pickupValue:(double)value slot:(int)slot parameter:(int)parameter current:(double)current {
@@ -545,19 +569,55 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (void)handleMIDI:(NSString*)source channel:(UInt8)channel cc:(UInt8)cc value:(UInt8)value {
     _lastMIDI=[NSString stringWithFormat:@"%@ · CH %d / CC %d / %d",source,channel+1,cc,value];_canvas.message=_audio.lastError.length?_audio.lastError:_lastMIDI;
     if(channel!=0){[self updateStatus];return;}if([self consumeDeviceContextCC:cc value:value])return;TXRenderState *s=_audio.state;
-    if(cc>=1&&cc<=6){int i=cc-1;if(![self canAdjustVolumeForSlot:i]){[self showBrowserCaptureHint:i];[self writeStatus];return;}double v=(_invert?127-value:value)/127.0;BOOL hit=[self pickupValue:v slot:i parameter:0 current:atomic_load(&s->gain[i])];_channels[i].fader.awaitingPickup=!hit;if(!hit)_canvas.message=[NSString stringWithFormat:@"픽업 대기 · 트랙 %d 페이더를 %.0f%% 위치까지 움직이면 연결됩니다.",i+1,atomic_load(&s->gain[i])*100];if(hit){atomic_store(&s->gain[i],v);_channels[i].fader.value=v;}[self showHUDForSlot:i message:hit?[NSString stringWithFormat:@"VOLUME %.0f%%",v*100]:[NSString stringWithFormat:@"픽업 대기 · %.0f%%",atomic_load(&s->gain[i])*100]];}
-    else if(cc>=7&&cc<=24){int bank=(cc-7)/6,i=(cc-7)%6,b=2-bank;if(![self canAdjustVolumeForSlot:i]){[self showBrowserCaptureHint:i];[self writeStatus];return;}double db=abs((int)value-64)<=1?0:(value/127.0*36-18);TXKnob *k=_channels[i].knobs[bank];BOOL hit=[self pickupValue:db slot:i parameter:b+1 current:atomic_load(&s->eq[i][b])];k.awaitingPickup=!hit;if(!hit)_canvas.message=[NSString stringWithFormat:@"픽업 대기 · 트랙 %d %@ 노브를 %+.1f dB에 맞추면 연결됩니다.",i+1,k.caption,atomic_load(&s->eq[i][b])];if(hit){atomic_store(&s->eq[i][b],db);k.value=db;}[self showHUDForSlot:i message:hit?[NSString stringWithFormat:@"%@ %+.1f dB",k.caption,db]:[NSString stringWithFormat:@"%@ 픽업 · %+.1f dB",k.caption,atomic_load(&s->eq[i][b])]];}
-    else if(cc>=25&&cc<=30&&value>=64){int i=cc-25;BOOL mute=!atomic_load(&s->muted[i]);atomic_store(&s->muted[i],mute);_channels[i].mute.state=mute?NSControlStateValueOn:NSControlStateValueOff;[self showHUDForSlot:i message:mute?@"음소거":@"음소거 해제"];}
+    if(cc>=1&&cc<=6){int i=cc-1;if(![self canAdjustVolumeForSlot:i]){[self showBrowserCaptureHint:i];[self writeStatus];return;}double v=(_invert?127-value:value)/127.0;BOOL hit=[self pickupValue:v slot:i parameter:0 current:atomic_load(&s->gain[i])];_channels[i].fader.awaitingPickup=!hit;if(!hit)_canvas.message=[NSString stringWithFormat:TXL(@"픽업 대기 · 트랙 %d 페이더를 %.0f%% 위치까지 움직이면 연결됩니다."),i+1,atomic_load(&s->gain[i])*100];if(hit){atomic_store(&s->gain[i],v);_channels[i].fader.value=v;}[self showHUDForSlot:i message:hit?[NSString stringWithFormat:@"VOLUME %.0f%%",v*100]:[NSString stringWithFormat:TXL(@"픽업 대기 · %.0f%%"),atomic_load(&s->gain[i])*100]];}
+    else if(cc>=7&&cc<=24){int bank=(cc-7)/6,i=(cc-7)%6,b=2-bank;if(![self canAdjustVolumeForSlot:i]){[self showBrowserCaptureHint:i];[self writeStatus];return;}double db=abs((int)value-64)<=1?0:(value/127.0*36-18);TXKnob *k=_channels[i].knobs[bank];BOOL hit=[self pickupValue:db slot:i parameter:b+1 current:atomic_load(&s->eq[i][b])];k.awaitingPickup=!hit;if(!hit)_canvas.message=[NSString stringWithFormat:TXL(@"픽업 대기 · 트랙 %d %@ 노브를 %+.1f dB에 맞추면 연결됩니다."),i+1,k.caption,atomic_load(&s->eq[i][b])];if(hit){atomic_store(&s->eq[i][b],db);k.value=db;}[self showHUDForSlot:i message:hit?[NSString stringWithFormat:@"%@ %+.1f dB",k.caption,db]:[NSString stringWithFormat:TXL(@"%@ 픽업 · %+.1f dB"),k.caption,atomic_load(&s->eq[i][b])]];}
+    else if(cc>=25&&cc<=30&&value>=64){int i=cc-25;BOOL mute=!atomic_load(&s->muted[i]);atomic_store(&s->muted[i],mute);_channels[i].mute.state=mute?NSControlStateValueOn:NSControlStateValueOff;[self showHUDForSlot:i message:mute?TXL(@"음소거"):TXL(@"음소거 해제")];}
     else if(cc==31){int delta=value<64?value:(int)value-128;float master=fmaxf(0,fminf(1,atomic_load(&s->master)+delta*0.01));atomic_store(&s->master,master);[self showHUDForSlot:-1 message:[NSString stringWithFormat:@"VOLUME %.0f%%",master*100]];}
-    else if(cc==33&&value>=64){atomic_store(&s->masterMuted,false);[self showHUDForSlot:-1 message:@"전체 음소거 해제"];}
-    else if(cc==34&&value>=64){atomic_store(&s->masterMuted,true);[self showHUDForSlot:-1 message:@"전체 음소거"];}
-    [self sendBrowserControls];[self updateStatus];[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveSettings) object:nil];[self performSelector:@selector(saveSettings) withObject:nil afterDelay:0.4 inModes:@[NSRunLoopCommonModes]];[self writeStatus];
+    else if(cc==33&&value>=64){atomic_store(&s->masterMuted,false);[self showHUDForSlot:-1 message:TXL(@"전체 음소거 해제")];}
+    else if(cc==34&&value>=64){atomic_store(&s->masterMuted,true);[self showHUDForSlot:-1 message:TXL(@"전체 음소거")];}
+    [self sendBrowserControls];if(cc>=25)[self updateStatus];else _canvas.needsDisplay=YES;[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveSettings) object:nil];[self performSelector:@selector(saveSettings) withObject:nil afterDelay:0.4 inModes:@[NSRunLoopCommonModes]];[self writeStatus];
 }
+- (void)openPreferences:(id)sender {[self showWindow:nil];[self showSettings:_startButton];}
 - (void)showSettings:(NSButton*)sender {[_settingsPopover showRelativeToRect:sender.bounds ofView:sender preferredEdge:NSRectEdgeMinX];}
-- (void)soundKey:(id)sender {atomic_store(&_audio.state->masterMuted,false);[self showHUDForSlot:-1 message:@"전체 음소거 해제"];[self updateStatus];}
-- (void)muteKey:(id)sender {atomic_store(&_audio.state->masterMuted,true);[self showHUDForSlot:-1 message:@"전체 음소거"];[self updateStatus];}
+- (void)soundKey:(id)sender {atomic_store(&_audio.state->masterMuted,false);[self showHUDForSlot:-1 message:TXL(@"전체 음소거 해제")];[self updateStatus];}
+- (void)muteKey:(id)sender {atomic_store(&_audio.state->masterMuted,true);[self showHUDForSlot:-1 message:TXL(@"전체 음소거")];[self updateStatus];}
 - (void)showBluetooth:(id)sender {if(!_bluetooth)_bluetooth=[CABTLEMIDIWindowController new];[_bluetooth showWindow:nil];[NSApp activateIgnoringOtherApps:YES];}
-- (void)showPrivacy:(id)sender {[[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"]];}
+- (void)showPrivacy:(id)sender {[[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"]];}
+- (void)languageChanged:(NSPopUpButton*)sender {TXSetLanguageCode(sender.selectedItem.representedObject);}
+- (void)languageDidChange:(NSNotification*)notification {
+    BOOL visible=_window.visible,setupVisible=_setupWindow.visible,hudVisible=_hud.visible;NSRect frame=_window.frame;NSString *calibration=_calibrationInput.stringValue;NSWindow *previous=_window;
+    [_settingsPopover close];[_hudDismiss invalidate];_pendingHUD=nil;[_hud orderOut:nil];_hud=nil;_hudView=nil;
+    [self buildWindow];[_window setFrame:frame display:NO];previous.delegate=nil;[previous close];_calibrationInput.stringValue=calibration;_canvas.message=@"";
+    _outputMenuSignature=nil;_processMenuSignature=nil;[self refreshDeviceMenus];[self updateStatus];[self tick:nil];
+    for(int i=0;i<6;i++){_channels[i].fader.awaitingPickup=_pickup&&!_latched[i][0];for(int b=0;b<3;b++)_channels[i].knobs[2-b].awaitingPickup=_pickup&&!_latched[i][b+1];}
+    if(visible)[_window makeKeyAndOrderFront:nil];_setupWindow.delegate=nil;[_setupWindow close];_setupWindow=nil;if(setupVisible)[self showSetup:nil];if(hudVisible)[self showHUDForSlot:-1 message:[NSString stringWithFormat:@"VOLUME %.0f%%",atomic_load(&_audio.state->master)*100]];[self writeStatus];
+}
+- (void)showSetup:(id)sender {
+    [_settingsPopover close];if(_setupWindow){[_setupWindow makeKeyAndOrderFront:nil];return;}
+    _setupWindow=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,620,570) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];_setupWindow.title=TXL(@"TX · MAC 시작 안내");_setupWindow.releasedWhenClosed=NO;_setupWindow.delegate=self;_setupWindow.appearance=[NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    NSView *view=_setupWindow.contentView;[view addSubview:Label(TXL(@"TX · MAC 연결하기"),NSMakeRect(24,515,572,32),22,NO)];
+    NSTextField *(^paragraph)(NSString*,NSRect)=^NSTextField*(NSString *text,NSRect rect){NSTextField *field=Label(text,rect,12,NO);field.maximumNumberOfLines=0;field.lineBreakMode=NSLineBreakByWordWrapping;[view addSubview:field];return field;};
+    paragraph(TXL(@"1  TX-6 연결"),NSMakeRect(24,472,572,24));_setupDevice=paragraph(@"",NSMakeRect(24,424,572,44));[view addSubview:Button(TXL(@"Bluetooth 연결…"),NSMakeRect(24,386,190,30),self,@selector(showBluetooth:))];
+    paragraph(TXL(@"2  시스템 오디오"),NSMakeRect(24,344,572,24));paragraph(TXL(@"앱별 음량과 EQ를 적용하기 위해 macOS 시스템 오디오 접근을 요청합니다. 오디오는 이 Mac에서 실시간 처리하며 녹음하거나 외부로 전송하지 않습니다. 화면이나 마이크 접근은 요청하지 않습니다."),NSMakeRect(24,260,572,76));
+    _setupAudio=paragraph(@"",NSMakeRect(24,204,572,48));_setupStart=Button(TXL(@"계속 · 오디오 시작"),NSMakeRect(24,163,250,32),self,@selector(setupStart:));[view addSubview:_setupStart];[view addSubview:Button(TXL(@"개인정보 보호 설정 열기"),NSMakeRect(286,163,310,32),self,@selector(showPrivacy:))];
+    paragraph(TXL(@"3  Chrome 탭별 조절 (선택 사항)"),NSMakeRect(24,118,572,24));paragraph(TXL(@"확장을 연결하면 재생 탭과 음소거를 자동 감지합니다. 개별 음량·EQ는 해당 탭에서 ⌘⇧6 또는 확장 아이콘으로 연결하세요."),NSMakeRect(24,65,572,48));
+    [view addSubview:Button(TXL(@"Chrome 확장 설정…"),NSMakeRect(24,20,220,30),self,@selector(openChromeSetup:))];[view addSubview:Button(TXL(@"나중에"),NSMakeRect(362,20,104,30),self,@selector(finishSetup:))];[view addSubview:Button(TXL(@"완료"),NSMakeRect(478,20,118,30),self,@selector(finishSetup:))];
+    [self updateSetupStatus];[_setupWindow center];[_setupWindow makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];
+}
+- (void)updateSetupStatus {
+    if(!_setupWindow)return;_setupDevice.stringValue=_midi.sources.count?[NSString stringWithFormat:TXL(@"연결된 TX-6 MIDI: %@"),[_midi.sources componentsJoinedByString:@" / "]]:TXL(@"TX-6 MIDI 연결 대기. USB 케이블을 연결하거나 Bluetooth 연결을 여세요. 오디오 출력은 메인 창에서 별도로 선택합니다.");
+    BOOL callbacks=_audio.running&&atomic_load(&_audio.state->callbacks)>0;BOOL signal=NO;for(int i=0;i<TX_SLOTS;i++)if(atomic_load(&_audio.state->peak[i])>0.00001)signal=YES;
+    _setupAudio.stringValue=_audio.lastError.length?_audio.lastError:(!_audio.running?TXL(@"아직 시작하지 않았습니다. 계속을 누르면 macOS가 필요한 경우 권한을 요청합니다."):(!callbacks?TXL(@"캡처 응답 대기 중입니다. 권한 상태는 아직 확인되지 않았습니다."):(signal?TXL(@"캡처 응답과 처리된 오디오 신호가 관측되었습니다."):TXL(@"캡처 응답이 있습니다. 처리 신호는 무음입니다. 권한 허용 여부를 단정할 수 없습니다. 앱 재생과 음량·음소거를 확인하세요."))));
+    _setupStart.enabled=!_audio.running;_setupStart.title=_audio.running?TXL(@"오디오 실행 중"):TXL(@"계속 · 오디오 시작");
+}
+- (void)setupStart:(id)sender {if(!_desiredRunning)[self toggleMixer:sender];[self updateSetupStatus];}
+- (void)finishSetup:(id)sender {[[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"TX6Mac.setupSeen"];[_setupWindow orderOut:nil];}
+- (void)openChromeSetup:(id)sender {
+    NSURL *extensionURL=[NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"BrowserExtension"];[[NSWorkspace sharedWorkspace] openURL:extensionURL];
+    NSAlert *alert=[NSAlert new];alert.messageText=TXL(@"Chrome 확장 설정");alert.informativeText=TXL(@"먼저 제공된 install.command로 앱과 네이티브 호스트를 설치하세요. Chrome에서 chrome://extensions를 열고 개발자 모드를 켠 뒤 ‘압축해제된 확장 프로그램 로드’로 열린 BrowserExtension 폴더를 선택합니다. 설치 후 이 앱을 다시 열어 연결하세요.");[alert addButtonWithTitle:TXL(@"확인")];[alert beginSheetModalForWindow:_setupWindow completionHandler:nil];
+}
+- (void)willSleep:(NSNotification*)notification {_sleeping=YES;_sleepResume=_desiredRunning;[_audio stop];[self sendBrowserControls];[self updateStatus];}
+- (void)didWake:(NSNotification*)notification {_sleeping=NO;if(_sleepResume&&_desiredRunning&&!_explicitStop){_sleepResume=NO;_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;[self refreshDevices];[self rebuildAudio];}[self updateStatus];}
 - (void)showWindow:(id)sender {[_window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];}
 - (BOOL)windowShouldClose:(NSWindow*)window {[window orderOut:nil];return NO;}
 - (BOOL)applicationShouldHandleReopen:(NSApplication*)app hasVisibleWindows:(BOOL)visible {[self showWindow:nil];return YES;}
@@ -567,8 +627,9 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 int main(void) {
     @autoreleasepool {
         NSArray *args=NSProcessInfo.processInfo.arguments;
-        if([args containsObject:@"--self-check"]){BOOL ok=TXRunSelfCheck() && TXRunMIDISelfCheck() && TXRunBrowserSelfCheck() && TXRunUIModelSelfCheck() && TXRunDeviceContextSelfCheck();printf("TX6Mac DSP/render self-check: %s\n",ok?"PASS":"FAIL");return ok?0:1;}
+        if([args containsObject:@"--self-check"]){BOOL ok=TXRunSelfCheck() && TXRunMIDISelfCheck() && TXRunBrowserSelfCheck() && TXRunUIModelSelfCheck() && TXRunDeviceContextSelfCheck() && TXRunLocalizationSelfCheck();printf("TX6Mac DSP/render self-check: %s\n",ok?"PASS":"FAIL");return ok?0:1;}
         if([args containsObject:@"--diagnose"]){NSData *json=[NSJSONSerialization dataWithJSONObject:TXAudio.diagnostics options:NSJSONWritingPrettyPrinted error:nil];fwrite(json.bytes,1,json.length,stdout);puts("");return 0;}
+        for(NSRunningApplication *running in [NSRunningApplication runningApplicationsWithBundleIdentifier:NSBundle.mainBundle.bundleIdentifier])if(running.processIdentifier!=NSProcessInfo.processInfo.processIdentifier){[running activateWithOptions:NSApplicationActivateAllWindows];return 0;}
         NSApplication *app=NSApplication.sharedApplication;[app setActivationPolicy:NSApplicationActivationPolicyRegular];__attribute__((objc_precise_lifetime)) TXApp *delegate=[TXApp new];app.delegate=delegate;[app run];
     }return 0;
 }

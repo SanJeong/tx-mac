@@ -1,3 +1,4 @@
+const txText = (key, substitutions) => chrome.i18n.getMessage(key, substitutions) || key;
 // 오디오는 메모리에서 처리하여 바로 재생합니다. 녹음·저장·외부 전송은 하지 않습니다.
 const entries = new Map();
 let lastControlsAt = 0;
@@ -68,7 +69,7 @@ function stopEntry(id) {
 
 async function startEntry(id, streamId) {
   if (!Number.isInteger(id) || id < 0 || typeof streamId !== 'string' || !streamId) {
-    throw new Error('올바른 탭 캡처 정보가 필요합니다.');
+    throw new Error(txText('invalidCapture'));
   }
   if (entries.has(id)) return;
   let stream;
@@ -103,7 +104,7 @@ async function startEntry(id, streamId) {
     entries.set(id, entry);
     for (const track of stream.getTracks()) track.onended = () => stopEntry(id);
     await context.resume();
-    if (context.state !== 'running') throw new Error('탭 오디오를 재생할 수 없습니다. 확장 아이콘을 다시 눌러 주세요.');
+    if (context.state !== 'running') throw new Error(txText('cannotPlay'));
     applyLatestControls();
   } catch (error) {
     stopEntry(id);
@@ -145,7 +146,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         latestChannels = Array.isArray(message.channels) ? message.channels : [];
         applyLatestControls(); return { ok: true };
       case 'restore': restoreAll(); return { ok: true };
-      default: return { ok: false, error: '알 수 없는 오디오 요청입니다.' };
+      default: return { ok: false, error: txText('unknownAudioRequest') };
     }
   })().then(respond).catch((error) => respond({ ok: false, error: String(error?.message ?? error) }));
   return true;

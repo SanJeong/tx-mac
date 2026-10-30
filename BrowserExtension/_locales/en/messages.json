@@ -1,0 +1,68 @@
+{
+  "appName": {
+    "message": "TX · MAC — Tab Mixer"
+  },
+  "appDescription": {
+    "message": "Find audible tabs automatically and control mute. Connect tab volume and EQ with the extension button or Command+Shift+6."
+  },
+  "actionTitle": {
+    "message": "Connect or disconnect this tab from TX · MAC"
+  },
+  "untitledTab": {
+    "message": "Untitled tab"
+  },
+  "audioPurpose": {
+    "message": "Process tab volume and EQ locally and restore original audio when the app disconnects. No recording."
+  },
+  "noAudioResponse": {
+    "message": "No response from the tab audio processor."
+  },
+  "retryConnection": {
+    "message": "Connection error — try again."
+  },
+  "detectedTooltip": {
+    "message": "Audible tab detected. Connect volume/EQ: click or Command+Shift+6."
+  },
+  "controlledTooltip": {
+    "message": "TX · MAC connected. Click or Command+Shift+6 to restore original playback."
+  },
+  "waitingTooltip": {
+    "message": "Tab audio connected; waiting for the Mac mixer. Original volume is playing. Click to disconnect."
+  },
+  "nativeDisconnectedDetail": {
+    "message": "Mac app disconnected: $DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "nativeDisconnected": {
+    "message": "Mac app disconnected. Restoring original volume and mute."
+  },
+  "nativeConnectionCheck": {
+    "message": "Check the Mac app connection: $DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "cannotConnectTab": {
+    "message": "Cannot connect this tab: $DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "invalidCapture": {
+    "message": "Valid tab capture information is required."
+  },
+  "cannotPlay": {
+    "message": "Cannot play tab audio. Press the extension button again."
+  },
+  "unknownAudioRequest": {
+    "message": "Unknown audio request."
+  }
+}

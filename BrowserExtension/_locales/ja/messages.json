@@ -1,0 +1,68 @@
+{
+  "appName": {
+    "message": "TX · MAC — タブミキサー"
+  },
+  "appDescription": {
+    "message": "再生中のタブを自動検出し、ミュートを切り替えます。音量・EQは拡張ボタンかCommand+Shift+6で接続できます。"
+  },
+  "actionTitle": {
+    "message": "このタブをTX · MACに接続／接続解除"
+  },
+  "untitledTab": {
+    "message": "無題のタブ"
+  },
+  "audioPurpose": {
+    "message": "タブの音量・EQをこのMac内で処理し、アプリとの接続が切れた場合は元の音声に戻します。録音はしません。"
+  },
+  "noAudioResponse": {
+    "message": "タブの音声処理から応答がありません。"
+  },
+  "retryConnection": {
+    "message": "接続エラーです。もう一度お試しください。"
+  },
+  "detectedTooltip": {
+    "message": "再生中のタブを検出。音量・EQの接続：クリックまたはCommand+Shift+6"
+  },
+  "controlledTooltip": {
+    "message": "TX · MACに接続中。クリックまたはCommand+Shift+6で元の再生に戻します。"
+  },
+  "waitingTooltip": {
+    "message": "タブの音声は接続済みです。Macミキサーの接続待ちのため、元の音量で再生しています。クリックで接続を解除します。"
+  },
+  "nativeDisconnectedDetail": {
+    "message": "Macアプリとの接続が切れました：$DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "nativeDisconnected": {
+    "message": "Macアプリとの接続が切れました。元の音量とミュート状態に戻します。"
+  },
+  "nativeConnectionCheck": {
+    "message": "Macアプリとの接続を確認してください：$DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "cannotConnectTab": {
+    "message": "このタブに接続できません：$DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "invalidCapture": {
+    "message": "有効なタブの音声キャプチャ情報が必要です。"
+  },
+  "cannotPlay": {
+    "message": "タブの音声を再生できません。拡張ボタンをもう一度押してください。"
+  },
+  "unknownAudioRequest": {
+    "message": "不明な音声リクエストです。"
+  }
+}

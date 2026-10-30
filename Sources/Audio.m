@@ -1,4 +1,5 @@
 #import "TX6.h"
+#import "Localization.h"
 #import <math.h>
 #import <libproc.h>
 
@@ -156,7 +157,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         if(!key.length)key=[NSString stringWithFormat:@"pid:%d",pid];
         NSMutableDictionary *g=groups[key];
         if(!g){NSString *name=app.localizedName; if(!name.length){NSURL *url=[[NSWorkspace sharedWorkspace] URLForApplicationWithBundleIdentifier:key];name=url?[[NSFileManager defaultManager] displayNameAtPath:url.path]:key;}
-            g=[@{@"key":key,@"name":systemSound?@"시스템 사운드":(name?:key),@"isSystemSound":@(systemSound),@"ids":[NSMutableArray array],@"bundles":[NSMutableArray array],@"active":@NO} mutableCopy];groups[key]=g;}
+            g=[@{@"key":key,@"name":systemSound?TXL(@"시스템 사운드"):(name?:key),@"isSystemSound":@(systemSound),@"ids":[NSMutableArray array],@"bundles":[NSMutableArray array],@"active":@NO} mutableCopy];groups[key]=g;}
         [g[@"ids"] addObject:n];if(bundle.length&&![g[@"bundles"] containsObject:bundle])[g[@"bundles"] addObject:bundle];
         if(ReadUInt(obj,kAudioProcessPropertyIsRunningOutput))g[@"active"]=@YES;
     }
@@ -164,19 +165,19 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
 }
 + (NSDictionary*)diagnostics {return @{@"outputs":[self outputs],@"processes":[self processes],@"defaultOutput":@([self defaultOutput])};}
 - (BOOL)fail:(NSString*)stage status:(OSStatus)status {
-    self.lastError=[NSString stringWithFormat:@"%@ 오류: %d (시스템 오디오 접근 권한과 출력 장치를 확인하세요)",stage,(int)status];[self stop];return NO;
+    self.lastError=[NSString stringWithFormat:TXL(@"%@ 오류: %d (시스템 오디오 접근 권한과 출력 장치를 확인하세요)"),stage,(int)status];[self stop];return NO;
 }
 - (BOOL)startOnDevice:(AudioDeviceID)device groups:(NSArray<NSArray<NSNumber*>*>*)groups {
     [self stop];self.lastError=@"";_device=device;
-    if(groups.count!=6)return [self fail:@"6개 트랙 그룹이 필요합니다" status:-4];
+    if(groups.count!=6)return [self fail:TXL(@"6개 트랙 그룹이 필요합니다") status:-4];
     NSMutableSet *uniqueProcesses=[NSMutableSet set];
     for(NSArray *group in groups)for(NSNumber *process in group){
-        if(![process isKindOfClass:NSNumber.class]||!process.unsignedIntValue||[uniqueProcesses containsObject:process])return [self fail:@"프로그램 중복 매핑" status:-5];
-        if((pid_t)ReadUInt(process.unsignedIntValue,kAudioProcessPropertyPID)==getpid())return [self fail:@"믹서 자체 출력은 트랙에 지정할 수 없습니다" status:-6];
+        if(![process isKindOfClass:NSNumber.class]||!process.unsignedIntValue||[uniqueProcesses containsObject:process])return [self fail:TXL(@"프로그램 중복 매핑") status:-5];
+        if((pid_t)ReadUInt(process.unsignedIntValue,kAudioProcessPropertyPID)==getpid())return [self fail:TXL(@"믹서 자체 출력은 트랙에 지정할 수 없습니다") status:-6];
         [uniqueProcesses addObject:process];
     }
-    NSString *uid=[TXAudio uid:device];if(!uid.length)return [self fail:@"출력 장치 없음" status:-1];
-    if(Channels(device,kAudioDevicePropertyScopeOutput)<2)return [self fail:@"스테레오 출력 장치가 필요합니다" status:-12];
+    NSString *uid=[TXAudio uid:device];if(!uid.length)return [self fail:TXL(@"출력 장치 없음") status:-1];
+    if(Channels(device,kAudioDevicePropertyScopeOutput)<2)return [self fail:TXL(@"스테레오 출력 장치가 필요합니다") status:-12];
     _state->physicalInputChannels=Channels(device,kAudioDevicePropertyScopeInput);_state->tapCount=0;
     _state->outputLeft=0;_state->outputRight=1;
     UInt32 stereo[2]={1,2},size=sizeof(stereo);AudioObjectPropertyAddress stereoAddr=Addr(kAudioDevicePropertyPreferredChannelsForStereo,kAudioDevicePropertyScopeOutput);
@@ -189,42 +190,42 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     for(int slot=0;slot<TX_SLOTS;slot++){
         NSArray *ids=slot<6?groups[slot]:excluded;if(slot<6&&!ids.count)continue;
         CATapDescription *desc=slot==6?[[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:ids]:[[CATapDescription alloc] initStereoMixdownOfProcesses:ids];
-        desc.name=[NSString stringWithFormat:@"TX6Mac 채널 %d",slot+1];desc.privateTap=YES;desc.muteBehavior=CATapMutedWhenTapped;
+        desc.name=[NSString stringWithFormat:TXL(@"TX6Mac 채널 %d"),slot+1];desc.privateTap=YES;desc.muteBehavior=CATapMutedWhenTapped;
         if(@available(macOS 26.0,*)){
             NSMutableOrderedSet<NSString*> *bundles=[NSMutableOrderedSet orderedSet];
             for(NSNumber *process in ids){NSString *bundle=ReadString(process.unsignedIntValue,kAudioProcessPropertyBundleID);if(bundle.length)[bundles addObject:bundle];}
             // 첫 오디오 입출력 전에 자신의 프로세스 객체가 없어도 자체 출력을 제외합니다.
-            if(slot==6){NSString *ownBundle=NSBundle.mainBundle.bundleIdentifier;if(ownBundle.length)[bundles addObject:ownBundle];else return [self fail:@"앱 식별자가 없어 피드백 방지를 보장할 수 없습니다" status:-7];}
+            if(slot==6){NSString *ownBundle=NSBundle.mainBundle.bundleIdentifier;if(ownBundle.length)[bundles addObject:ownBundle];else return [self fail:TXL(@"앱 식별자가 없어 피드백 방지를 보장할 수 없습니다") status:-7];}
             desc.bundleIDs=bundles.array;desc.processRestoreEnabled=YES;
         }
-        AudioObjectID tap=0;OSStatus status=AudioHardwareCreateProcessTap(desc,&tap);if(status!=noErr)return [self fail:@"프로그램 오디오 탭 생성" status:status];
+        AudioObjectID tap=0;OSStatus status=AudioHardwareCreateProcessTap(desc,&tap);if(status!=noErr)return [self fail:TXL(@"프로그램 오디오 탭 생성") status:status];
         [_taps addObject:@(tap)];_state->tapSlots[_state->tapCount++]=slot;
         if(slot==6){_globalDescription=desc;_globalTap=tap;}
         AudioStreamBasicDescription tapFormat={0};UInt32 tapFormatSize=sizeof(tapFormat);AudioObjectPropertyAddress tapFormatAddr=Addr(kAudioTapPropertyFormat,kAudioObjectPropertyScopeGlobal);
         status=AudioObjectGetPropertyData(tap,&tapFormatAddr,0,NULL,&tapFormatSize,&tapFormat);
-        if(status!=noErr||tapFormat.mChannelsPerFrame!=2||tapFormat.mFormatID!=kAudioFormatLinearPCM||!(tapFormat.mFormatFlags&kAudioFormatFlagIsFloat)||tapFormat.mBitsPerChannel!=32)return [self fail:@"지원하지 않는 프로그램 오디오 탭 형식" status:status?:-8];
+        if(status!=noErr||tapFormat.mChannelsPerFrame!=2||tapFormat.mFormatID!=kAudioFormatLinearPCM||!(tapFormat.mFormatFlags&kAudioFormatFlagIsFloat)||tapFormat.mBitsPerChannel!=32)return [self fail:TXL(@"지원하지 않는 프로그램 오디오 탭 형식") status:status?:-8];
         [tapList addObject:@{@kAudioSubTapUIDKey:desc.UUID.UUIDString,@kAudioSubTapDriftCompensationKey:@YES}];
     }
     NSDictionary *description=@{@kAudioAggregateDeviceUIDKey:[@"local.tx6mac." stringByAppendingString:NSUUID.UUID.UUIDString],@kAudioAggregateDeviceNameKey:@"TX6Mac Mixer",@kAudioAggregateDeviceIsPrivateKey:@YES,@kAudioAggregateDeviceIsStackedKey:@NO,@kAudioAggregateDeviceMainSubDeviceKey:uid,@kAudioAggregateDeviceSubDeviceListKey:@[@{@kAudioSubDeviceUIDKey:uid}],@kAudioAggregateDeviceTapListKey:tapList,@kAudioAggregateDeviceTapAutoStartKey:@NO};
     OSStatus status=AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)description,&_aggregate);
-    if(status!=noErr)return [self fail:@"믹서 오디오 장치 생성" status:status];
+    if(status!=noErr)return [self fail:TXL(@"믹서 오디오 장치 생성") status:status];
     CFArrayRef activeTapUIDs=NULL;size=sizeof(activeTapUIDs);AudioObjectPropertyAddress tapOrderAddr=Addr(kAudioAggregateDevicePropertyTapList,kAudioObjectPropertyScopeGlobal);
     status=AudioObjectGetPropertyData(_aggregate,&tapOrderAddr,0,NULL,&size,&activeTapUIDs);
     NSArray *actualOrder=CFBridgingRelease(activeTapUIDs);NSMutableArray *expectedOrder=[NSMutableArray array];for(NSDictionary *entry in tapList)[expectedOrder addObject:entry[@kAudioSubTapUIDKey]];
-    if(status!=noErr||![actualOrder isEqualToArray:expectedOrder])return [self fail:@"프로그램 오디오 채널 순서 확인" status:status?:-9];
-    if(Channels(_aggregate,kAudioDevicePropertyScopeInput)!=_state->physicalInputChannels+2*_state->tapCount)return [self fail:@"프로그램 오디오 입력 레이아웃 확인" status:-10];
+    if(status!=noErr||![actualOrder isEqualToArray:expectedOrder])return [self fail:TXL(@"프로그램 오디오 채널 순서 확인") status:status?:-9];
+    if(Channels(_aggregate,kAudioDevicePropertyScopeInput)!=_state->physicalInputChannels+2*_state->tapCount)return [self fail:TXL(@"프로그램 오디오 입력 레이아웃 확인") status:-10];
     // 입출력이 Float32인지 확인하고, 지원하지 않는 형식은 원음을 복구합니다.
     for(NSNumber *stream in [ReadIDs(_aggregate,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeInput) arrayByAddingObjectsFromArray:ReadIDs(_aggregate,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeOutput)]){
         AudioStreamBasicDescription f={0};size=sizeof(f);AudioObjectPropertyAddress a=Addr(kAudioStreamPropertyVirtualFormat,kAudioObjectPropertyScopeGlobal);
         status=AudioObjectGetPropertyData(stream.unsignedIntValue,&a,0,NULL,&size,&f);
-        if(status!=noErr||f.mFormatID!=kAudioFormatLinearPCM||!(f.mFormatFlags&kAudioFormatFlagIsFloat)||f.mBitsPerChannel!=32)return [self fail:@"지원하지 않는 오디오 형식" status:status?:-2];
+        if(status!=noErr||f.mFormatID!=kAudioFormatLinearPCM||!(f.mFormatFlags&kAudioFormatFlagIsFloat)||f.mBitsPerChannel!=32)return [self fail:TXL(@"지원하지 않는 오디오 형식") status:status?:-2];
     }
     Float64 rate=48000;size=sizeof(rate);AudioObjectPropertyAddress rateAddr=Addr(kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal);
-    status=AudioObjectGetPropertyData(_aggregate,&rateAddr,0,NULL,&size,&rate);if(status!=noErr||rate<8000)return [self fail:@"샘플레이트 확인" status:status?:-3];_state->sampleRate=rate;
+    status=AudioObjectGetPropertyData(_aggregate,&rateAddr,0,NULL,&size,&rate);if(status!=noErr||rate<8000)return [self fail:TXL(@"샘플레이트 확인") status:status?:-3];_state->sampleRate=rate;
     atomic_store(&_state->layoutFault,0);atomic_store(&_state->callbacks,0);atomic_store(&_state->frames,0);
     atomic_store(&_state->outputPeak,0);_state->smoothMaster=0;_state->limiterGain=1;atomic_store(&_state->limitedFrames,0);
     for(int slot=0;slot<TX_SLOTS;slot++){_state->smoothGain[slot]=0;for(int b=0;b<TX_EQ;b++){memset(&_state->filters[slot][b],0,sizeof(TXFilter));_state->currentEQ[slot][b]=atomic_load(&_state->eq[slot][b]);SetFilter(&_state->filters[slot][b],b,_state->currentEQ[slot][b],rate);}}
-    status=AudioDeviceCreateIOProcID(_aggregate,Render,_state,&_proc);if(status!=noErr)return [self fail:@"오디오 처리 연결" status:status];
+    status=AudioDeviceCreateIOProcID(_aggregate,Render,_state,&_proc);if(status!=noErr)return [self fail:TXL(@"오디오 처리 연결") status:status];
     // IOProc를 등록한 뒤에는 자기 프로세스를 직접 제외할 수 있어야 합니다.
     pid_t ownPID=getpid();AudioObjectID ownObject=0;size=sizeof(ownObject);AudioObjectPropertyAddress ownAddr=Addr(kAudioHardwarePropertyTranslatePIDToProcessObject,kAudioObjectPropertyScopeGlobal);
     status=AudioObjectGetPropertyData(kAudioObjectSystemObject,&ownAddr,sizeof(ownPID),&ownPID,&size,&ownObject);
@@ -233,12 +234,12 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
             _globalDescription.processes=[_globalDescription.processes arrayByAddingObject:@(ownObject)];
             CATapDescription *description=_globalDescription;size=sizeof(description);AudioObjectPropertyAddress descAddr=Addr(kAudioTapPropertyDescription,kAudioObjectPropertyScopeGlobal);
             status=AudioObjectSetPropertyData(_globalTap,&descAddr,0,NULL,size,&description);
-            if(status!=noErr)return [self fail:@"자체 출력 피드백 방지 설정" status:status];
+            if(status!=noErr)return [self fail:TXL(@"자체 출력 피드백 방지 설정") status:status];
         }
     }else if(@available(macOS 26.0,*)){
         // 이 경우 명시적으로 제외한 자신의 bundle ID가 피드백을 막습니다.
-    }else return [self fail:@"자체 오디오 프로세스 확인" status:status?:-11];
-    status=AudioDeviceStart(_aggregate,_proc);if(status!=noErr)return [self fail:@"오디오 시작" status:status];_running=YES;return YES;
+    }else return [self fail:TXL(@"자체 오디오 프로세스 확인") status:status?:-11];
+    status=AudioDeviceStart(_aggregate,_proc);if(status!=noErr)return [self fail:TXL(@"오디오 시작") status:status];_running=YES;return YES;
 }
 - (void)stop {
     if(_aggregate&&_proc){AudioDeviceStop(_aggregate,_proc);AudioDeviceDestroyIOProcID(_aggregate,_proc);}_proc=NULL;

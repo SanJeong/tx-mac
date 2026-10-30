@@ -1,0 +1,68 @@
+{
+  "appName": {
+    "message": "TX · MAC — 탭 믹서"
+  },
+  "appDescription": {
+    "message": "소리 나는 탭을 자동 감지하고 음소거를 조절합니다. 개별 음량·EQ는 확장 버튼 또는 Command+Shift+6으로 연결하세요."
+  },
+  "actionTitle": {
+    "message": "이 탭을 TX · MAC 믹서에 연결 / 연결 해제"
+  },
+  "untitledTab": {
+    "message": "제목 없는 탭"
+  },
+  "audioPurpose": {
+    "message": "탭의 음량·EQ를 이 맥에서 처리하고 앱 연결이 끊기면 원래 오디오로 복구합니다. 녹음하지 않습니다."
+  },
+  "noAudioResponse": {
+    "message": "탭 오디오 처리 응답이 없습니다."
+  },
+  "retryConnection": {
+    "message": "연결 오류 — 다시 눌러 주세요."
+  },
+  "detectedTooltip": {
+    "message": "재생 탭 자동 감지 · 음량/EQ 연결: 클릭 또는 Command+Shift+6"
+  },
+  "controlledTooltip": {
+    "message": "TX · MAC 제어 연결됨 · 클릭 또는 Command+Shift+6으로 원래 재생 복구"
+  },
+  "waitingTooltip": {
+    "message": "탭 오디오 연결됨 · 맥 믹서 대기 · 현재 원래 음량 재생 · 클릭하면 연결 해제"
+  },
+  "nativeDisconnectedDetail": {
+    "message": "맥 앱 연결이 끊겼습니다: $DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "nativeDisconnected": {
+    "message": "맥 앱 연결이 끊겼습니다. 원래 음량과 음소거로 복구합니다."
+  },
+  "nativeConnectionCheck": {
+    "message": "맥 앱 연결을 확인하세요: $DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "cannotConnectTab": {
+    "message": "이 탭을 연결할 수 없습니다: $DETAIL$",
+    "placeholders": {
+      "detail": {
+        "content": "$1"
+      }
+    }
+  },
+  "invalidCapture": {
+    "message": "올바른 탭 캡처 정보가 필요합니다."
+  },
+  "cannotPlay": {
+    "message": "탭 오디오를 재생할 수 없습니다. 확장 버튼을 다시 눌러 주세요."
+  },
+  "unknownAudioRequest": {
+    "message": "알 수 없는 오디오 요청입니다."
+  }
+}

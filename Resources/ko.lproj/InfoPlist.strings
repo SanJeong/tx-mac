@@ -1,0 +1,2 @@
+"NSAudioCaptureUsageDescription" = "앱별 음량과 EQ를 조절하기 위해 Mac에서 재생하는 오디오에 접근합니다. 오디오는 녹음하거나 외부로 전송하지 않습니다.";
+"NSBluetoothAlwaysUsageDescription" = "TX-6와 Bluetooth MIDI로 연결하여 음량과 EQ를 조절합니다.";

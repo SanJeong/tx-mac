@@ -1,3 +1,4 @@
+const txText = (key, substitutions) => chrome.i18n.getMessage(key, substitutions) || key;
 const HOST = 'local.tx6mac.browser';
 const OFFSCREEN_URL = chrome.runtime.getURL('offscreen.html');
 let nativePort = null;
@@ -23,7 +24,7 @@ export function safeHost(url) {
 }
 
 export function tabMetadata(tab, captured = null) {
-  let title = String(tab.title || '제목 없는 탭').slice(0, 100);
+  let title = String(tab.title || txText('untitledTab')).slice(0, 100);
   if (/[\uD800-\uDBFF]$/.test(title)) title = title.slice(0, -1);
   return {
     id: tab.id, title,
@@ -101,7 +102,7 @@ async function ensureOffscreen() {
   if (await offscreenExists()) return;
   if (!creatingOffscreen) creatingOffscreen = chrome.offscreen.createDocument({
     url: 'offscreen.html', reasons: ['USER_MEDIA'],
-    justification: '탭 오디오의 음량·EQ 처리와 앱 연결 중단 시 원래 음량·음소거 상태를 복구합니다. 녹음하지 않습니다.',
+    justification: txText('audioPurpose'),
   }).finally(() => { creatingOffscreen = null; });
   await creatingOffscreen;
 }
@@ -109,7 +110,7 @@ async function ensureOffscreen() {
 async function offscreen(message) {
   if (!(await offscreenExists())) return { ok: true, tabs: [] };
   const response = await chrome.runtime.sendMessage({ ...message, target: 'offscreen' });
-  if (!response?.ok) throw new Error(response?.error || '탭 오디오 처리 응답이 없습니다.');
+  if (!response?.ok) throw new Error(response?.error || txText('noAudioResponse'));
   return response;
 }
 
@@ -120,10 +121,10 @@ async function badge(tabId, captured, error = false) {
     chrome.action.setBadgeBackgroundColor({ tabId, color: error ? '#CC4A28' : ready ? '#607F65' : '#9B8956' }),
     chrome.action.setBadgeText({ tabId, text: error ? '!' : captured ? (ready ? 'ON' : 'CAP') : detected ? 'DET' : '' }),
     chrome.action.setTitle({ tabId, title: error
-      ? `TX · MAC: ${nativeError || '연결 오류 — 다시 눌러 주세요.'}`
-      : !captured ? '소리 나는 탭 자동 감지 · 음량/EQ 연결: 클릭 또는 Command+Shift+6'
-      : ready ? 'TX · MAC 제어 연결됨 · 클릭 또는 Command+Shift+6으로 원래 재생 복구'
-      : '탭 오디오 연결됨 / 맥 앱 믹서 대기 · 현재 원래 음량 재생 · 클릭하면 연결 해제' }),
+      ? `TX · MAC: ${nativeError || txText('retryConnection')}`
+      : !captured ? txText('detectedTooltip')
+      : ready ? txText('controlledTooltip')
+      : txText('waitingTooltip') }),
   ]);
 }
 
@@ -234,7 +235,7 @@ function connectNative() {
       if (nativePort !== port) return;
       const detail = chrome.runtime.lastError?.message; nativePort = null;
       if (snapshotTimer) { clearInterval(snapshotTimer); snapshotTimer = null; }
-      nativeError = detail ? `맥 앱 연결이 끊겼습니다: ${detail}` : '맥 앱 연결이 끊겼습니다. 원래 음량과 음소거로 복구합니다.';
+      nativeError = detail ? txText('nativeDisconnectedDetail', detail) : txText('nativeDisconnected');
       void failOpen();
       if (reconnectAttempts < 3) {
         const delay = [2000, 5000, 15000][reconnectAttempts++];
@@ -243,7 +244,7 @@ function connectNative() {
     });
     void publishSnapshot();
   } catch (error) {
-    nativePort = null; nativeError = `맥 앱 연결을 확인하세요: ${String(error?.message ?? error)}`; void failOpen();
+    nativePort = null; nativeError = txText('nativeConnectionCheck', String(error?.message ?? error)); void failOpen();
   }
 }
 
@@ -263,7 +264,7 @@ async function toggleTab(tab) {
     }
     await publishSnapshot();
   } catch (error) {
-    nativeError = `이 탭을 연결할 수 없습니다: ${String(error?.message ?? error)}`.slice(0, 300);
+    nativeError = txText('cannotConnectTab', String(error?.message ?? error)).slice(0, 300);
     await badge(tab.id, false, true); await publishSnapshot();
   } finally { toggling.delete(tab.id); }
 }
