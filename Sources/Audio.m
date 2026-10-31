@@ -2,6 +2,7 @@
 #import "Localization.h"
 #import <math.h>
 #import <libproc.h>
+#import <stdarg.h>
 
 static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector selector,AudioObjectPropertyScope scope) {
     return (AudioObjectPropertyAddress){selector,scope,kAudioObjectPropertyElementMain};
@@ -33,38 +34,87 @@ static BOOL IsSystemSoundProcess(NSString *executablePath,NSString *bundleID) {
     return [executablePath isEqualToString:@"/usr/sbin/systemsoundserverd"] ||
         (!executablePath.length && [bundleID isEqualToString:@"systemsoundserverd"]);
 }
-static BOOL AddStreamRange(NSMutableIndexSet *covered,UInt32 start,UInt32 count,UInt32 total,UInt32 boundary);
+static BOOL LayoutTraceEnabled(void) {
+    const char *value=getenv("TX6_LAYOUT_TRACE");return value&&strcmp(value,"1")==0;
+}
+static void LayoutTrace(const char *format,...) __attribute__((format(printf,1,2)));
+static void LayoutTrace(const char *format,...) {
+    if(!LayoutTraceEnabled())return;
+    fprintf(stderr,"[TX6_LAYOUT_TRACE] ");va_list arguments;va_start(arguments,format);vfprintf(stderr,format,arguments);va_end(arguments);fputc('\n',stderr);
+}
+static void TraceStreams(AudioDeviceID device,AudioObjectPropertyScope scope) {
+    if(!LayoutTraceEnabled())return;
+    NSArray<NSNumber*> *streams=ReadIDs(device,kAudioDevicePropertyStreams,scope);
+    LayoutTrace("streams device=%u scope=%s count=%lu",device,scope==kAudioDevicePropertyScopeInput?"input":"output",(unsigned long)streams.count);
+    for(NSUInteger i=0;i<streams.count;i++){
+        AudioObjectID stream=streams[i].unsignedIntValue;UInt32 start=0,size=sizeof(start);AudioStreamBasicDescription format={0};
+        AudioObjectPropertyAddress a=Addr(kAudioStreamPropertyStartingChannel,kAudioObjectPropertyScopeGlobal);
+        OSStatus startStatus=AudioObjectGetPropertyData(stream,&a,0,NULL,&size,&start);
+        a=Addr(kAudioStreamPropertyVirtualFormat,kAudioObjectPropertyScopeGlobal);size=sizeof(format);
+        OSStatus formatStatus=AudioObjectGetPropertyData(stream,&a,0,NULL,&size,&format);
+        LayoutTrace("stream device=%u index=%lu id=%u start=%u startStatus=%d formatChannels=%u formatStatus=%d formatID=0x%08x flags=0x%08x bits=%u rate=%.6f",device,(unsigned long)i,stream,start,(int)startStatus,format.mChannelsPerFrame,(int)formatStatus,(unsigned)format.mFormatID,(unsigned)format.mFormatFlags,format.mBitsPerChannel,format.mSampleRate);
+    }
+}
+static BOOL InputStreamUsage(const UInt32 *starts,const UInt32 *widths,UInt32 count,UInt32 physical,UInt32 total,UInt32 *base,UInt32 *usage) {
+    if(!starts||!widths||!count||!base||!usage||physical>total||!starts[0])return NO;
+    // HAL logical input channels may have a common offset from the packed IO buffers.
+    *base=starts[0]-1;UInt32 covered=0;
+    for(UInt32 i=0;i<count;i++){
+        if(starts[i]<=*base||starts[i]-*base-1!=covered||!widths[i]||widths[i]>total-covered||
+           (covered<physical&&widths[i]>physical-covered)||(uint64_t)starts[i]+widths[i]-1>UINT32_MAX)return NO;
+        usage[i]=covered>=physical;covered+=widths[i];
+    }
+    return covered==total;
+}
 static OSStatus UseOnlyTapInputs(AudioDeviceID device,AudioDeviceIOProcID proc,UInt32 physical,UInt32 total) {
-    if(!physical)return noErr;
+    LayoutTrace("tap-input begin device=%u physical=%u total=%u proc=%p",device,physical,total,(void*)proc);
+    TraceStreams(device,kAudioDevicePropertyScopeInput);
     NSArray<NSNumber*> *streams=ReadIDs(device,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeInput);
-    if(!streams.count)return kAudioHardwareBadStreamError;
+    if(!streams.count||streams.count>(UINT32_MAX-offsetof(AudioHardwareIOProcStreamUsage,mStreamIsOn))/sizeof(UInt32)){LayoutTrace("tap-input failure device=%u stage=stream-list status=%d",device,(int)kAudioHardwareBadStreamError);return kAudioHardwareBadStreamError;}
     UInt32 bytes=(UInt32)(offsetof(AudioHardwareIOProcStreamUsage,mStreamIsOn)+streams.count*sizeof(UInt32));
-    AudioHardwareIOProcStreamUsage *usage=calloc(1,bytes);if(!usage)return kAudioHardwareUnspecifiedError;
+    AudioHardwareIOProcStreamUsage *usage=calloc(1,bytes);
+    if(!usage){LayoutTrace("tap-input failure device=%u stage=usage-allocation status=%d",device,(int)kAudioHardwareUnspecifiedError);return kAudioHardwareUnspecifiedError;}
+    UInt32 *ranges=calloc(streams.count,2*sizeof(UInt32));
+    if(!ranges){free(usage);LayoutTrace("tap-input failure device=%u stage=range-allocation status=%d",device,(int)kAudioHardwareUnspecifiedError);return kAudioHardwareUnspecifiedError;}
+    UInt32 *starts=ranges,*widths=ranges+streams.count,base=0;
     usage->mIOProc=(void*)proc;usage->mNumberStreams=(UInt32)streams.count;
-    NSMutableIndexSet *covered=[NSMutableIndexSet indexSet];OSStatus status=noErr;
+    OSStatus status=noErr;const char *stage="stream-ranges";
     for(NSUInteger i=0;i<streams.count;i++){
         AudioObjectID stream=streams[i].unsignedIntValue;UInt32 start=0,size=sizeof(start);AudioStreamBasicDescription format={0};
         AudioObjectPropertyAddress address=Addr(kAudioStreamPropertyStartingChannel,kAudioObjectPropertyScopeGlobal);
-        status=AudioObjectGetPropertyData(stream,&address,0,NULL,&size,&start);if(status!=noErr)break;
+        status=AudioObjectGetPropertyData(stream,&address,0,NULL,&size,&start);
+        if(status!=noErr){stage="stream-start";LayoutTrace("tap-input stream-failure index=%lu id=%u status=%d",(unsigned long)i,stream,(int)status);break;}
         address=Addr(kAudioStreamPropertyVirtualFormat,kAudioObjectPropertyScopeGlobal);size=sizeof(format);
-        status=AudioObjectGetPropertyData(stream,&address,0,NULL,&size,&format);if(status!=noErr)break;
-        UInt32 count=format.mChannelsPerFrame;
-        if(!AddStreamRange(covered,start,count,total,physical)){status=kAudioHardwareBadStreamError;break;}
-        usage->mStreamIsOn[i]=start-1>=physical;
+        status=AudioObjectGetPropertyData(stream,&address,0,NULL,&size,&format);
+        if(status!=noErr){stage="stream-format";LayoutTrace("tap-input stream-failure index=%lu id=%u status=%d",(unsigned long)i,stream,(int)status);break;}
+        starts[i]=start;widths[i]=format.mChannelsPerFrame;
     }
-    if(status==noErr&&covered.count!=total)status=kAudioHardwareBadStreamError;
-    AudioObjectPropertyAddress address=Addr(kAudioDevicePropertyIOProcStreamUsage,kAudioDevicePropertyScopeInput);
-    if(status==noErr)status=AudioObjectSetPropertyData(device,&address,0,NULL,bytes,usage);
+    if(status==noErr&&!InputStreamUsage(starts,widths,(UInt32)streams.count,physical,total,&base,usage->mStreamIsOn)){
+        stage="stream-ranges";status=kAudioHardwareBadStreamError;
+        LayoutTrace("tap-input ranges-rejected base=%u physical=%u total=%u",base,physical,total);
+    }
     if(status==noErr){
+        LayoutTrace("tap-input ranges-valid base=%u physical=%u total=%u",base,physical,total);
+        for(NSUInteger i=0;i<streams.count;i++)LayoutTrace("tap-input usage-planned index=%lu id=%u start=%u relativeStart=%u channels=%u on=%u",(unsigned long)i,streams[i].unsignedIntValue,starts[i],starts[i]-base,widths[i],usage->mStreamIsOn[i]);
+    }
+    AudioObjectPropertyAddress address=Addr(kAudioDevicePropertyIOProcStreamUsage,kAudioDevicePropertyScopeInput);
+    if(status==noErr&&physical){
+        stage="usage-write";status=AudioObjectSetPropertyData(device,&address,0,NULL,bytes,usage);
+        LayoutTrace("tap-input usage-write device=%u bytes=%u streams=%u status=%d",device,bytes,usage->mNumberStreams,(int)status);
+    }
+    if(status==noErr&&physical){
         AudioHardwareIOProcStreamUsage *actual=calloc(1,bytes);
-        if(!actual)status=kAudioHardwareUnspecifiedError;
-        else{actual->mIOProc=(void*)proc;UInt32 size=bytes;status=AudioObjectGetPropertyData(device,&address,0,NULL,&size,actual);
-            if(status==noErr&&(size!=bytes||actual->mNumberStreams!=usage->mNumberStreams))status=kAudioHardwareBadStreamError;
-            if(status==noErr)for(NSUInteger i=0;i<streams.count;i++)if(!!actual->mStreamIsOn[i]!=!!usage->mStreamIsOn[i]){status=kAudioHardwareBadStreamError;break;}
+        if(!actual){stage="readback-allocation";status=kAudioHardwareUnspecifiedError;}
+        else{actual->mIOProc=(void*)proc;UInt32 size=bytes;stage="usage-read";status=AudioObjectGetPropertyData(device,&address,0,NULL,&size,actual);
+            LayoutTrace("tap-input usage-read device=%u bytes=%u expectedBytes=%u streams=%u expectedStreams=%u status=%d",device,size,bytes,actual->mNumberStreams,usage->mNumberStreams,(int)status);
+            if(LayoutTraceEnabled())for(NSUInteger i=0;i<MIN(streams.count,(NSUInteger)actual->mNumberStreams);i++)LayoutTrace("tap-input usage-readback index=%lu id=%u expected=%u actual=%u",(unsigned long)i,streams[i].unsignedIntValue,usage->mStreamIsOn[i],actual->mStreamIsOn[i]);
+            if(status==noErr&&(size!=bytes||actual->mNumberStreams!=usage->mNumberStreams)){stage="readback-shape";status=kAudioHardwareBadStreamError;}
+            if(status==noErr)for(NSUInteger i=0;i<streams.count;i++)if(!!actual->mStreamIsOn[i]!=!!usage->mStreamIsOn[i]){stage="readback-usage";status=kAudioHardwareBadStreamError;break;}
             free(actual);
         }
     }
-    free(usage);return status;
+    LayoutTrace("tap-input %s device=%u stage=%s status=%d base=%u physical=%u total=%u",status==noErr?"complete":"failure",device,stage,(int)status,base,physical,total);
+    free(ranges);free(usage);return status;
 }
 static BOOL OutputLayout(NSArray<NSString*> *order,NSString *primary,NSString *monitor,NSString *meter,NSDictionary<NSString*,NSDictionary*> *counts,UInt32 *primaryOffset,UInt32 *monitorOffset,UInt32 *meterOffset,UInt32 *inputs,UInt32 *outputs) {
     NSUInteger expected=1+(monitor.length?1:0)+(meter.length?1:0);
@@ -294,11 +344,13 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
 }
 + (NSDictionary*)diagnostics {return @{@"outputs":[self outputs],@"processes":[self processes],@"defaultOutput":@([self defaultOutput])};}
 - (BOOL)fail:(NSString*)stage status:(OSStatus)status {
+    LayoutTrace("startup failure stage=%s status=%d primary=%u monitor=%u meter=%u aggregate=%u physical=%u taps=%d",stage.UTF8String,(int)status,_device,self.monitorOutputDevice,self.meterOutputDevice,_aggregate,atomic_load(&_state->physicalInputChannels),atomic_load(&_state->tapCount));
     self.lastError=[NSString stringWithFormat:TXL(@"%@ 오류: %d (시스템 오디오 접근 권한과 출력 장치를 확인하세요)"),stage,(int)status];[self stop];return NO;
 }
 - (BOOL)startOnDevice:(AudioDeviceID)device groups:(NSArray<NSArray<NSNumber*>*>*)groups {
     NSAssert(!NSThread.isMainThread,@"HAL startup must not block the main thread");
     [self stop];self.lastError=@"";_device=device;
+    LayoutTrace("startup begin primary=%u monitor=%u meter=%u",device,self.monitorOutputDevice,self.meterOutputDevice);
     if(groups.count!=6)return [self fail:TXL(@"6개 트랙 그룹이 필요합니다") status:-4];
     NSMutableSet *uniqueProcesses=[NSMutableSet set];
     for(NSArray *group in groups)for(NSNumber *process in group){
@@ -359,6 +411,8 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     NSMutableDictionary *counts=[NSMutableDictionary dictionaryWithObject:@{@"in":@(Channels(device,kAudioDevicePropertyScopeInput)),@"out":@(Channels(device,kAudioDevicePropertyScopeOutput))} forKey:uid];
     if(meter)counts[meterUID]=@{@"in":@(Channels(meter,kAudioDevicePropertyScopeInput)),@"out":@(Channels(meter,kAudioDevicePropertyScopeOutput))};
     if(monitor)counts[monitorUID]=@{@"in":@(Channels(monitor,kAudioDevicePropertyScopeInput)),@"out":@(Channels(monitor,kAudioDevicePropertyScopeOutput))};
+    if(LayoutTraceEnabled())LayoutTrace("aggregate device=%u fullListStatus=%d order=%s counts=%s",_aggregate,(int)status,fullOrder.description.UTF8String,counts.description.UTF8String);
+    TraceStreams(_aggregate,kAudioDevicePropertyScopeOutput);
     UInt32 mainOffset=0,monitorOffset=0,meterOffset=0,totalInputs=0,totalOutputs=0;
     if(status!=noErr||!OutputLayout(fullOrder,uid,monitorUID,meterUID,counts,&mainOffset,&monitorOffset,&meterOffset,&totalInputs,&totalOutputs)||Channels(_aggregate,kAudioDevicePropertyScopeOutput)!=totalOutputs||!OutputStreamsValid(_aggregate,totalOutputs))return [self fail:TXL(@"프로그램 오디오 채널 순서 확인") status:-22];
     UInt32 mainOutputs=[counts[uid][@"out"] unsignedIntValue];
@@ -368,10 +422,12 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     if(monitor&&(_state->monitorLeft>=monitorOutputs||_state->monitorRight>=monitorOutputs||_state->monitorLeft==_state->monitorRight))return [self fail:TXL(@"모니터 스테레오 채널 확인") status:-27];
     _state->monitorLeft+=monitorOffset;_state->monitorRight+=monitorOffset;_state->monitorEnabled=monitor!=0;
     _state->meterOutputOffset=meterOffset;_state->meterEnabled=meter!=0;
+    LayoutTrace("aggregate offsets device=%u main=%u monitor=%u meter=%u physical=%u outputs=%u mainStereo=%u,%u monitorStereo=%u,%u taps=%d",_aggregate,mainOffset,monitorOffset,meterOffset,totalInputs,totalOutputs,_state->outputLeft,_state->outputRight,_state->monitorLeft,_state->monitorRight,atomic_load(&_state->tapCount));
     CFArrayRef activeTapUIDs=NULL;size=sizeof(activeTapUIDs);AudioObjectPropertyAddress tapOrderAddr=Addr(kAudioAggregateDevicePropertyTapList,kAudioObjectPropertyScopeGlobal);
     status=AudioObjectGetPropertyData(_aggregate,&tapOrderAddr,0,NULL,&size,&activeTapUIDs);
     NSArray *actualOrder=CFBridgingRelease(activeTapUIDs);NSMutableArray *expectedOrder=[NSMutableArray array];for(NSDictionary *entry in tapList)[expectedOrder addObject:entry[@kAudioSubTapUIDKey]];
     if(status!=noErr||![actualOrder isEqualToArray:expectedOrder])return [self fail:TXL(@"프로그램 오디오 채널 순서 확인") status:status?:-9];
+    if(LayoutTraceEnabled())LayoutTrace("aggregate input-count device=%u actual=%u expected=%u physical=%u taps=%d",_aggregate,Channels(_aggregate,kAudioDevicePropertyScopeInput),_state->physicalInputChannels+2*_state->tapCount,atomic_load(&_state->physicalInputChannels),atomic_load(&_state->tapCount));
     if(Channels(_aggregate,kAudioDevicePropertyScopeInput)!=_state->physicalInputChannels+2*_state->tapCount)return [self fail:TXL(@"프로그램 오디오 입력 레이아웃 확인") status:-10];
     for(NSNumber *stream in [ReadIDs(_aggregate,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeInput) arrayByAddingObjectsFromArray:ReadIDs(_aggregate,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeOutput)]){
         AudioStreamBasicDescription f={0};size=sizeof(f);AudioObjectPropertyAddress a=Addr(kAudioStreamPropertyVirtualFormat,kAudioObjectPropertyScopeGlobal);
@@ -503,6 +559,25 @@ BOOL TXRunSelfCheck(void) {
     NSMutableIndexSet *inputCoverage=[NSMutableIndexSet indexSet];
     if(!AddStreamRange(inputCoverage,17,2,20,16)||!AddStreamRange(inputCoverage,1,12,20,16)||!AddStreamRange(inputCoverage,19,2,20,16)||!AddStreamRange(inputCoverage,13,4,20,16)||inputCoverage.count!=20)return NO;
     if(AddStreamRange([NSMutableIndexSet indexSet],16,2,20,16)||AddStreamRange([NSMutableIndexSet indexSet],0,2,20,16))return NO;
+    UInt32 shiftedStarts[]={7,9,11,13},shiftedWidths[]={2,2,2,2},inputUsage[4]={0},inputBase=0;
+    if(!InputStreamUsage(shiftedStarts,shiftedWidths,4,2,8,&inputBase,inputUsage)||inputBase!=6||inputUsage[0]!=0||inputUsage[1]!=1||inputUsage[2]!=1||inputUsage[3]!=1){
+        fprintf(stderr,"Shifted input stream classification rejected: physical=2 total=8 starts=7,9,11,13\n");return NO;
+    }
+    UInt32 denseStarts[]={1,3,5,7};
+    if(!InputStreamUsage(denseStarts,shiftedWidths,4,2,8,&inputBase,inputUsage)||inputBase!=0||inputUsage[0]!=0||inputUsage[1]!=1||inputUsage[2]!=1||inputUsage[3]!=1)return NO;
+    if(!InputStreamUsage(shiftedStarts,shiftedWidths,3,0,6,&inputBase,inputUsage)||inputBase!=6||inputUsage[0]!=1||inputUsage[1]!=1||inputUsage[2]!=1)return NO;
+    UInt32 multiplePhysicalStarts[]={7,10,11,13},multiplePhysicalWidths[]={3,1,2,2};
+    if(!InputStreamUsage(multiplePhysicalStarts,multiplePhysicalWidths,4,4,8,&inputBase,inputUsage)||inputUsage[0]!=0||inputUsage[1]!=0||inputUsage[2]!=1||inputUsage[3]!=1)return NO;
+    UInt32 badInputStarts[][4]={{7,9,12,14},{7,8,10,12},{9,7,11,13},{7,9,11,14},{0,2,4,6},{UINT32_MAX-5,UINT32_MAX-3,UINT32_MAX-1,UINT32_MAX}};
+    for(int i=0;i<6;i++)if(InputStreamUsage(badInputStarts[i],shiftedWidths,4,2,8,&inputBase,inputUsage))return NO;
+    UInt32 zeroWidth[]={2,0,2,2};
+    if(InputStreamUsage(shiftedStarts,zeroWidth,4,2,8,&inputBase,inputUsage)||
+       InputStreamUsage(shiftedStarts,shiftedWidths,4,1,8,&inputBase,inputUsage)||
+       InputStreamUsage(shiftedStarts,shiftedWidths,4,3,8,&inputBase,inputUsage)||
+       InputStreamUsage(shiftedStarts,shiftedWidths,4,9,8,&inputBase,inputUsage)||
+       InputStreamUsage(shiftedStarts,shiftedWidths,4,2,9,&inputBase,inputUsage)||
+       InputStreamUsage(shiftedStarts,shiftedWidths,4,2,7,&inputBase,inputUsage)||
+       InputStreamUsage(shiftedStarts,shiftedWidths,0,2,8,&inputBase,inputUsage))return NO;
     NSDictionary *single=@{@"main":@{@"in":@2,@"out":@2}};
     if(!OutputLayout(@[@"main"],@"main",@"",@"",single,&po,&no,&mo,&ic,&oc)||po!=0||ic!=2||oc!=2)return NO;
     NSDictionary *dual=@{@"main":@{@"in":@2,@"out":@2},@"monitor":@{@"in":@4,@"out":@12}};
