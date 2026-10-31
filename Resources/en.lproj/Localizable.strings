@@ -185,3 +185,5 @@
 "%@ · 대기" = "%@ · waiting";
 "메인 출력 장치가 변경되어 오디오 연결을 중지했습니다." = "The main output device changed. Audio has been stopped.";
 "선택한 USB 미터 장치가 변경되어 연결하지 않았습니다." = "The selected USB meter device changed and was not connected.";
+"미리 듣기 음량 %@" = "Monitor level %@";
+"미리 듣기 출력 꺼짐 · 저장된 음량 %@" = "Monitor output off · stored level %@";
