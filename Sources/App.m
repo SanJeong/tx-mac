@@ -1344,6 +1344,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 int main(void) {
     @autoreleasepool {
         NSArray *args=NSProcessInfo.processInfo.arguments;
+        if([args containsObject:@"--probe-audio-mute-guard"])return TXProbeAudioMuteGuard();
         if([args containsObject:@"--quiet-usb-source"])return TXQuietUSBSource();
         if([args containsObject:@"--hold-audio-mute-guard"])return TXHoldAudioMuteGuard();
         if([args containsObject:@"--check-usb-meter-route"])return TXCheckUSBMeterRoute([args containsObject:@"--direct"]);

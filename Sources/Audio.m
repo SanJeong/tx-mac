@@ -353,7 +353,7 @@ static NSArray<NSNumber*> *GuardOwnProcesses(NSError **error) {
     NSError *ownerError=nil;NSArray<NSNumber*> *owners=_owners(&ownerError);
     if(!owners){if(error)*error=ownerError?:GuardError(@"Process ownership",kAudioHardwareBadObjectError);return NO;}
     CATapDescription *description=[[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:owners];
-    // CATapMuted holds source silence without an IOProc or aggregate, independently of TXAudio.stop.
+    // CATapMuted requests source silence; no-IO effectiveness requires separate live verification.
     description.name=@"TX6Mac Transition Guard";description.privateTap=YES;description.muteBehavior=CATapMuted;
     AudioObjectID tap=kAudioObjectUnknown;OSStatus status=_create(description,&tap);
     if(status!=noErr||tap==kAudioObjectUnknown){if(error)*error=GuardError(@"Create mute guard",status?:kAudioHardwareBadObjectError);return NO;}
@@ -397,6 +397,154 @@ int TXHoldAudioMuteGuard(void) {
         }
     }});
     dispatch_semaphore_wait(finished,DISPATCH_TIME_FOREVER);return result;
+}
+
+typedef struct {
+    _Atomic(uint64_t) callbacks,frames,samples,nonfinite;
+    _Atomic(double) energy;
+    _Atomic(float) peak;
+    _Atomic(int) fault;
+} TXGuardProbePCM;
+_Static_assert(__atomic_always_lock_free(sizeof(double),0)&&__atomic_always_lock_free(sizeof(uint64_t),0)&&__atomic_always_lock_free(sizeof(float),0),"Guard probe statistics must be lock-free");
+static OSStatus GuardProbeInput(AudioObjectID device,const AudioTimeStamp *now,const AudioBufferList *input,const AudioTimeStamp *it,AudioBufferList *output,const AudioTimeStamp *ot,void *context) {
+    TXGuardProbePCM *s=context;
+    if(output)for(UInt32 b=0;b<output->mNumberBuffers;b++)if(output->mBuffers[b].mData)memset(output->mBuffers[b].mData,0,output->mBuffers[b].mDataByteSize);
+    if(!input){atomic_store(&s->fault,1);return noErr;}
+    UInt32 channels=0,frames=UINT32_MAX;
+    for(UInt32 b=0;b<input->mNumberBuffers;b++){
+        const AudioBuffer *buffer=&input->mBuffers[b];
+        if(!buffer->mData||!buffer->mNumberChannels||buffer->mNumberChannels>2||buffer->mDataByteSize%(sizeof(float)*buffer->mNumberChannels)){atomic_store(&s->fault,2);return noErr;}
+        channels+=buffer->mNumberChannels;frames=MIN(frames,buffer->mDataByteSize/(sizeof(float)*buffer->mNumberChannels));
+    }
+    if(channels!=2){atomic_store(&s->fault,3);return noErr;}
+    float peak=atomic_load_explicit(&s->peak,memory_order_relaxed);double energy=atomic_load_explicit(&s->energy,memory_order_relaxed);uint64_t finite=0,bad=0;
+    for(UInt32 b=0;b<input->mNumberBuffers;b++){
+        const AudioBuffer *buffer=&input->mBuffers[b];const float *pcm=buffer->mData;
+        for(UInt32 f=0;f<frames;f++)for(UInt32 c=0;c<buffer->mNumberChannels;c++){
+            float value=pcm[f*buffer->mNumberChannels+c];if(!isfinite(value)){bad++;continue;}
+            peak=fmaxf(peak,fabsf(value));energy+=(double)value*value;finite++;
+        }
+    }
+    atomic_store_explicit(&s->peak,peak,memory_order_relaxed);atomic_store_explicit(&s->energy,energy,memory_order_relaxed);
+    atomic_fetch_add_explicit(&s->samples,finite,memory_order_relaxed);atomic_fetch_add_explicit(&s->nonfinite,bad,memory_order_relaxed);
+    atomic_fetch_add_explicit(&s->frames,frames,memory_order_relaxed);atomic_fetch_add_explicit(&s->callbacks,1,memory_order_relaxed);return noErr;
+}
+static NSDictionary *ProbeIDs(AudioObjectID object,AudioObjectPropertySelector selector,AudioObjectPropertyScope scope) {
+    AudioObjectPropertyAddress a=Addr(selector,scope);UInt32 size=0;OSStatus status=AudioObjectGetPropertyDataSize(object,&a,0,NULL,&size);
+    if(status==noErr&&size%sizeof(AudioObjectID))status=kAudioHardwareBadObjectError;
+    NSMutableArray *values=[NSMutableArray array];
+    if(status==noErr&&size){
+        AudioObjectID *ids=malloc(size);UInt32 capacity=size;
+        if(!ids)status=kAudioHardwareUnspecifiedError;
+        else{status=AudioObjectGetPropertyData(object,&a,0,NULL,&size,ids);
+            if(status==noErr&&(size>capacity||size%sizeof(*ids)))status=kAudioHardwareBadObjectError;
+            if(status==noErr)for(UInt32 i=0;i<size/sizeof(*ids);i++)[values addObject:@(ids[i])];free(ids);}
+    }
+    return @{@"status":@(status),@"objects":values};
+}
+static NSDictionary *ProbeUInt(AudioObjectID object,AudioObjectPropertySelector selector) {
+    AudioObjectPropertyAddress a=Addr(selector,kAudioObjectPropertyScopeGlobal);UInt32 value=0,size=sizeof(value);
+    OSStatus status=AudioObjectGetPropertyData(object,&a,0,NULL,&size,&value);if(status==noErr&&size!=sizeof(value))status=kAudioHardwareBadObjectError;
+    return @{@"status":@(status),@"value":status==noErr?@(value):NSNull.null};
+}
+static NSDictionary *ProbeProcesses(void) {
+    NSDictionary *list=ProbeIDs(kAudioObjectSystemObject,kAudioHardwarePropertyProcessObjectList,kAudioObjectPropertyScopeGlobal);NSMutableArray *processes=[NSMutableArray array];
+    for(NSNumber *object in list[@"objects"]){AudioObjectID process=object.unsignedIntValue;
+        [processes addObject:@{@"objectID":object,@"pid":ProbeUInt(process,kAudioProcessPropertyPID),@"bundleID":ReadString(process,kAudioProcessPropertyBundleID),
+            @"runningOutput":ProbeUInt(process,kAudioProcessPropertyIsRunningOutput),@"outputDevices":ProbeIDs(process,kAudioProcessPropertyDevices,kAudioDevicePropertyScopeOutput),@"inputDevices":ProbeIDs(process,kAudioProcessPropertyDevices,kAudioDevicePropertyScopeInput)}];
+    }
+    return @{@"status":list[@"status"],@"processes":processes};
+}
+static NSDictionary *ProbeTapReadback(AudioObjectID tap) {
+    if(!tap)return @{@"present":@NO};
+    CFTypeRef raw=NULL;UInt32 size=sizeof(raw);AudioObjectPropertyAddress a=Addr(kAudioTapPropertyDescription,kAudioObjectPropertyScopeGlobal);
+    OSStatus status=AudioObjectGetPropertyData(tap,&a,0,NULL,&size,&raw);CATapDescription *description=CFBridgingRelease(raw);
+    NSMutableDictionary *result=[@{@"present":@YES,@"status":@(status),@"tapUID":ReadString(tap,kAudioTapPropertyUID)} mutableCopy];
+    if(status==noErr&&[description isKindOfClass:CATapDescription.class]){
+        result[@"description"]=@{@"muteBehavior":@(description.muteBehavior),@"processes":description.processes?:@[],@"exclusive":@(description.exclusive),@"private":@(description.privateTap),@"deviceUID":description.deviceUID?:NSNull.null,@"stream":description.stream?:NSNull.null,@"bundleIDs":description.bundleIDs?:@[],@"uuid":description.UUID.UUIDString?:@""};
+    }
+    AudioStreamBasicDescription format={0};size=sizeof(format);a=Addr(kAudioTapPropertyFormat,kAudioObjectPropertyScopeGlobal);
+    OSStatus formatStatus=AudioObjectGetPropertyData(tap,&a,0,NULL,&size,&format);
+    result[@"format"]=@{@"status":@(formatStatus),@"sampleRate":isfinite(format.mSampleRate)?@(format.mSampleRate):NSNull.null,@"channels":@(format.mChannelsPerFrame),@"formatID":@(format.mFormatID),@"flags":@(format.mFormatFlags),@"bits":@(format.mBitsPerChannel)};
+    return result;
+}
+static NSDictionary *ProbeAggregateDescription(NSString *tapUUID) {
+    return @{@kAudioAggregateDeviceUIDKey:[@"local.tx6mac.guard-probe." stringByAppendingString:NSUUID.UUID.UUIDString],@kAudioAggregateDeviceNameKey:@"TX6Mac Guard Probe",@kAudioAggregateDeviceIsPrivateKey:@YES,@kAudioAggregateDeviceSubDeviceListKey:@[],@kAudioAggregateDeviceTapListKey:@[@{@kAudioSubTapUIDKey:tapUUID,@kAudioSubTapDriftCompensationKey:@YES}],@kAudioAggregateDeviceTapAutoStartKey:@YES};
+}
+typedef OSStatus (^TXProbeOperation)(NSString*);
+typedef void (^TXProbeEvent)(NSString*,OSStatus);
+typedef void (^TXProbeWait)(double);
+static int RunGuardProbeStages(TXProbeOperation operation,TXProbeEvent event,TXProbeWait wait) {
+    int result=0;
+    @try{
+        event(@"waiting",noErr);wait(1);
+        NSArray *actions=@[@"begin",@"aggregate_create",@"validate_input",@"io_create",@"io_start",@"io_stop"];
+        double holds[]={2,2,0,0,3,2};
+        for(NSUInteger i=0;i<actions.count;i++){
+            NSString *action=actions[i];event([action stringByAppendingString:@"_requested"],noErr);OSStatus status=operation(action);event(action,status);
+            if(status!=noErr){result=3;break;}if(holds[i]){wait(holds[i]);event([action stringByAppendingString:@"_observed"],noErr);}
+        }
+    }@catch(NSException *exception){event(@"exception",kAudioHardwareUnspecifiedError);result=3;}
+    @finally{
+        for(NSString *action in @[@"io_stop",@"io_destroy",@"aggregate_destroy",@"end"]){
+            for(int attempt=0;attempt<2;attempt++){
+                OSStatus status=operation(action);event([@"cleanup_" stringByAppendingString:action],status);
+                if(status==noErr)break;result=4;
+            }
+        }
+        event(result?@"failed":@"completed",result?kAudioHardwareUnspecifiedError:noErr);
+    }
+    return result;
+}
+int TXProbeAudioMuteGuard(void) {
+    for(NSRunningApplication *app in [NSRunningApplication runningApplicationsWithBundleIdentifier:NSBundle.mainBundle.bundleIdentifier])if(app.processIdentifier!=getpid()){
+        GuardEvent(@"refused",nil,GuardError(@"Quit the mixer before the mute guard probe",2));return 2;
+    }
+    __block int result=0;dispatch_semaphore_t finished=dispatch_semaphore_create(0);
+    dispatch_queue_t worker=dispatch_queue_create("local.tx6mac.mute-guard-stages",DISPATCH_QUEUE_SERIAL);
+    dispatch_source_t watchdog=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0));
+    dispatch_source_set_timer(watchdog,dispatch_time(DISPATCH_TIME_NOW,18*NSEC_PER_SEC),DISPATCH_TIME_FOREVER,0);
+    dispatch_source_set_event_handler(watchdog,^{GuardEvent(@"probe_timeout",nil,GuardError(@"HAL stage exceeded 18 seconds; private resources end with this diagnostic process",5));_Exit(5);});dispatch_resume(watchdog);
+    dispatch_async(worker,^{@autoreleasepool{
+        TXGuardProbePCM *pcm=calloc(1,sizeof(*pcm));
+        if(!pcm){result=3;dispatch_semaphore_signal(finished);return;}
+        __block AudioObjectID tap=0;__block AudioDeviceID aggregate=0;__block AudioDeviceIOProcID proc=NULL;__block BOOL started=NO;__block NSString *tapUUID=nil;
+        TXAudioMuteGuard *guard=[[TXAudioMuteGuard alloc] initWithCreate:^OSStatus(CATapDescription *description,AudioObjectID *created){
+            OSStatus status=AudioHardwareCreateProcessTap(description,created);if(status==noErr&&*created){tap=*created;tapUUID=description.UUID.UUIDString;}return status;
+        } destroy:^OSStatus(AudioObjectID object){OSStatus status=AudioHardwareDestroyProcessTap(object);if(status==noErr)tap=0;return status;} owners:^NSArray<NSNumber*>*(NSError **error){return GuardOwnProcesses(error);}];
+        TXProbeEvent event=^(NSString *stage,OSStatus status){
+            struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);uint64_t samples=atomic_load(&pcm->samples);double energy=atomic_load(&pcm->energy);float peak=atomic_load(&pcm->peak);
+            NSDictionary *entry=@{@"event":stage,@"status":@(status),@"monotonicSeconds":@(now.tv_sec+now.tv_nsec/1e9),@"ownPID":@(getpid()),@"tapID":@(tap),@"aggregateID":@(aggregate),@"ioStarted":@(started),@"active":@(guard.active),@"activeIsNotProofOfSilence":@YES,@"tap":ProbeTapReadback(tap),@"rawHAL":ProbeProcesses(),@"aggregateInputChannels":@(aggregate?Channels(aggregate,kAudioDevicePropertyScopeInput):0),@"aggregateOutputChannels":@(aggregate?Channels(aggregate,kAudioDevicePropertyScopeOutput):0),@"capture":@{@"callbacks":@(atomic_load(&pcm->callbacks)),@"frames":@(atomic_load(&pcm->frames)),@"finiteSamples":@(samples),@"nonfinite":@(atomic_load(&pcm->nonfinite)),@"peak":@(peak),@"rms":@(samples?sqrt(energy/samples):0),@"fault":@(atomic_load(&pcm->fault))}};
+            NSData *json=[NSJSONSerialization dataWithJSONObject:entry options:NSJSONWritingSortedKeys error:nil];fwrite(json.bytes,1,json.length,stdout);fputc('\n',stdout);fflush(stdout);
+        };
+        TXProbeOperation operation=^OSStatus(NSString *action){
+            if([action isEqualToString:@"begin"]){NSError *error=nil;return [guard begin:&error]?noErr:(OSStatus)error.code;}
+            if([action isEqualToString:@"aggregate_create"]){
+                if(!tapUUID.length)return kAudioHardwareBadObjectError;AudioDeviceID created=0;
+                OSStatus status=AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)ProbeAggregateDescription(tapUUID),&created);
+                if(status==noErr&&created)aggregate=created;return status?:created?noErr:kAudioHardwareBadObjectError;
+            }
+            if([action isEqualToString:@"validate_input"]){
+                if(Channels(aggregate,kAudioDevicePropertyScopeInput)!=2||Channels(aggregate,kAudioDevicePropertyScopeOutput)!=0)return kAudioHardwareBadStreamError;
+                NSArray *streams=ReadIDs(aggregate,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeInput);if(!streams.count)return kAudioHardwareBadStreamError;
+                for(NSNumber *stream in streams){AudioStreamBasicDescription format={0};UInt32 size=sizeof(format);AudioObjectPropertyAddress a=Addr(kAudioStreamPropertyVirtualFormat,kAudioObjectPropertyScopeGlobal);OSStatus status=AudioObjectGetPropertyData(stream.unsignedIntValue,&a,0,NULL,&size,&format);
+                    if(status!=noErr)return status;if(format.mFormatID!=kAudioFormatLinearPCM||!(format.mFormatFlags&kAudioFormatFlagIsFloat)||(format.mFormatFlags&kAudioFormatFlagIsBigEndian)||format.mBitsPerChannel!=32||!format.mChannelsPerFrame||format.mBytesPerFrame!=sizeof(float)*((format.mFormatFlags&kAudioFormatFlagIsNonInterleaved)?1:format.mChannelsPerFrame)||!isfinite(format.mSampleRate)||format.mSampleRate<8000)return kAudioHardwareUnsupportedOperationError;}
+                return noErr;
+            }
+            if([action isEqualToString:@"io_create"]){AudioDeviceIOProcID created=NULL;OSStatus status=AudioDeviceCreateIOProcID(aggregate,GuardProbeInput,pcm,&created);if(status==noErr&&created)proc=created;return status?:created?noErr:kAudioHardwareBadObjectError;}
+            if([action isEqualToString:@"io_start"]){OSStatus status=AudioDeviceStart(aggregate,proc);if(status==noErr)started=YES;return status;}
+            if([action isEqualToString:@"io_stop"]){if(!started)return noErr;OSStatus status=AudioDeviceStop(aggregate,proc);if(status==noErr)started=NO;return status;}
+            if([action isEqualToString:@"io_destroy"]){if(!proc)return noErr;OSStatus status=AudioDeviceDestroyIOProcID(aggregate,proc);if(status==noErr){proc=NULL;started=NO;}return status;}
+            if([action isEqualToString:@"aggregate_destroy"]){if(!aggregate)return noErr;OSStatus status=AudioHardwareDestroyAggregateDevice(aggregate);if(status==noErr)aggregate=0;return status;}
+            if([action isEqualToString:@"end"]){NSError *error=nil;return [guard end:&error]?noErr:(OSStatus)error.code;}
+            return kAudioHardwareUnsupportedOperationError;
+        };
+        result=RunGuardProbeStages(operation,event,^(double seconds){[NSThread sleepForTimeInterval:seconds];});
+        if(!proc)free(pcm);
+        else{fprintf(stderr,"Guard probe IOProc cleanup failed; retaining callback state until process exit.\n");result=4;}
+        dispatch_semaphore_signal(finished);
+    }});
+    dispatch_semaphore_wait(finished,DISPATCH_TIME_FOREVER);dispatch_source_cancel(watchdog);return result;
 }
 
 @implementation TXAudio {
@@ -645,6 +793,53 @@ static int CheckUSBMeterRoute(BOOL direct,BOOL quiet) {
 int TXCheckUSBMeterRoute(BOOL direct) {return CheckUSBMeterRoute(direct,NO);}
 int TXQuietUSBSource(void) {return CheckUSBMeterRoute(YES,YES);}
 
+static BOOL GuardProbeSelfCheck(void) {
+    NSDictionary *aggregate=ProbeAggregateDescription(@"fake-tap-uuid");
+    if(![aggregate[@kAudioAggregateDeviceIsPrivateKey] boolValue]||![aggregate[@kAudioAggregateDeviceTapAutoStartKey] boolValue]||[aggregate[@kAudioAggregateDeviceSubDeviceListKey] count]||![aggregate[@kAudioAggregateDeviceTapListKey][0][@kAudioSubTapUIDKey] isEqualToString:@"fake-tap-uuid"])return NO;
+    NSArray *failures=@[@"",@"begin",@"aggregate_create",@"validate_input",@"io_create",@"io_start",@"io_stop",@"io_destroy",@"aggregate_destroy",@"end",@"exception"];
+    for(NSString *failure in failures){
+        __block BOOL tap=NO,device=NO,proc=NO,running=NO,injected=NO,valid=YES;__block double waited=0;
+        NSMutableArray *actions=[NSMutableArray array],*events=[NSMutableArray array];
+        int result=RunGuardProbeStages(^OSStatus(NSString *action){
+            [actions addObject:action];
+            if(!injected&&[failure isEqualToString:@"exception"]&&[action isEqualToString:@"io_start"]){injected=YES;@throw [NSException exceptionWithName:@"ProbeSelfCheck" reason:@"Injected" userInfo:nil];}
+            if(!injected&&[action isEqualToString:failure]){injected=YES;return -801;}
+            if([action isEqualToString:@"begin"]){valid=valid&&!tap;tap=YES;}
+            else if([action isEqualToString:@"aggregate_create"]){valid=valid&&tap&&!device;device=YES;}
+            else if([action isEqualToString:@"validate_input"]){valid=valid&&device;}
+            else if([action isEqualToString:@"io_create"]){valid=valid&&device&&!proc;proc=YES;}
+            else if([action isEqualToString:@"io_start"]){valid=valid&&proc&&!running;running=YES;}
+            else if([action isEqualToString:@"io_stop"])running=NO;
+            else if([action isEqualToString:@"io_destroy"]){valid=valid&&!running;proc=NO;}
+            else if([action isEqualToString:@"aggregate_destroy"]){valid=valid&&!proc;device=NO;}
+            else if([action isEqualToString:@"end"]){valid=valid&&!device;tap=NO;}
+            else valid=NO;return noErr;
+        },^(NSString *event,OSStatus status){[events addObject:event];},^(double duration){waited+=duration;});
+        BOOL cleanupFailure=[@[@"io_destroy",@"aggregate_destroy",@"end"] containsObject:failure];
+        if(!valid||tap||device||proc||running||result!=(failure.length?(cleanupFailure?4:3):0))return NO;
+        if(!failure.length&&(waited!=10||![actions isEqualToArray:@[@"begin",@"aggregate_create",@"validate_input",@"io_create",@"io_start",@"io_stop",@"io_stop",@"io_destroy",@"aggregate_destroy",@"end"]]||![events.lastObject isEqualToString:@"completed"]))return NO;
+        if(failure.length&&(!injected||![events.lastObject isEqualToString:@"failed"]))return NO;
+    }
+    __block int endAttempts=0;
+    int persistent=RunGuardProbeStages(^OSStatus(NSString *action){if([action isEqualToString:@"end"]){endAttempts++;return -802;}return noErr;},^(NSString *event,OSStatus status){},^(double seconds){});
+    if(persistent!=4||endAttempts!=2)return NO;
+    float inputPCM[]={.1f,-.2f,.3f,-.4f},outputPCM[]={1,2,3,4};
+    AudioBufferList input={.mNumberBuffers=1,.mBuffers={{2,sizeof(inputPCM),inputPCM}}};
+    AudioBufferList output={.mNumberBuffers=1,.mBuffers={{2,sizeof(outputPCM),outputPCM}}};TXGuardProbePCM pcm={0};
+    GuardProbeInput(0,NULL,&input,NULL,&output,NULL,&pcm);
+    for(int i=0;i<4;i++)if(outputPCM[i]!=0)return NO;
+    if(atomic_load(&pcm.callbacks)!=1||atomic_load(&pcm.frames)!=2||atomic_load(&pcm.samples)!=4||fabsf(atomic_load(&pcm.peak)-.4f)>1e-7||fabs(atomic_load(&pcm.energy)-.3)>1e-7||atomic_load(&pcm.fault))return NO;
+    float left[]={.5f,NAN},right[]={-.6f,INFINITY};
+    struct{UInt32 count;AudioBuffer buffers[2];} planar={2,{{1,sizeof(left),left},{1,sizeof(right),right}}};
+    GuardProbeInput(0,NULL,(AudioBufferList*)&planar,NULL,NULL,NULL,&pcm);
+    if(atomic_load(&pcm.callbacks)!=2||atomic_load(&pcm.frames)!=4||atomic_load(&pcm.samples)!=6||atomic_load(&pcm.nonfinite)!=2||fabsf(atomic_load(&pcm.peak)-.6f)>1e-7||fabs(atomic_load(&pcm.energy)-.91)>1e-7)return NO;
+    input.mBuffers[0].mData=NULL;for(int i=0;i<4;i++)outputPCM[i]=1;
+    GuardProbeInput(0,NULL,&input,NULL,&output,NULL,&pcm);
+    for(int i=0;i<4;i++)if(outputPCM[i]!=0)return NO;
+    if(atomic_load(&pcm.fault)!=2||atomic_load(&pcm.callbacks)!=2)return NO;
+    return YES;
+}
+
 static BOOL GuardSelfCheck(void) {
     __block NSUInteger creates=0,destroys=0,ownersRead=0;__block OSStatus createStatus=noErr,destroyStatus=noErr;
     __block BOOL ownerFailure=NO,validDescription=YES;__block AudioObjectID createdID=501,lastDestroyed=0;
@@ -691,7 +886,7 @@ static BOOL GuardSelfCheck(void) {
 }
 BOOL TXRunSelfCheck(void) {
     __block BOOL guardOK=NO;dispatch_semaphore_t guardFinished=dispatch_semaphore_create(0);
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{guardOK=GuardSelfCheck();dispatch_semaphore_signal(guardFinished);}});
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{guardOK=GuardSelfCheck()&&GuardProbeSelfCheck();dispatch_semaphore_signal(guardFinished);}});
     dispatch_semaphore_wait(guardFinished,DISPATCH_TIME_FOREVER);
     if(!guardOK){fprintf(stderr,"Mute guard lifecycle self-check failed.\n");return NO;}
 

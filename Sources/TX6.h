@@ -76,6 +76,7 @@ typedef struct {
 BOOL TXRunSelfCheck(void);
 int TXCheckUSBMeterRoute(BOOL direct);
 int TXHoldAudioMuteGuard(void);
+int TXProbeAudioMuteGuard(void);
 int TXQuietUSBSource(void);
 int TXMeasureUSBReturn(BOOL requestMicrophone);
 BOOL TXRunMIDISelfCheck(void);
