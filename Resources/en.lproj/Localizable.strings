@@ -213,3 +213,16 @@
 "취소" = "Cancel";
 "씬 전환 중" = "Switching scene";
 "중지 중" = "Stopping";
+"레벨" = "Levels";
+"레벨…" = "Levels…";
+"트랙 / 출력" = "Track / Output";
+"현재 피크 (dBFS)" = "Current peak (dBFS)";
+"최고 피크 (dBFS)" = "Highest peak (dBFS)";
+"상태" = "Status";
+"최고값 초기화" = "Reset highest peaks";
+"최고값 초기화 대기" = "Waiting to reset highest peaks";
+"CH: EQ·음량·음소거 후, MASTER·출력 경로 전. MAIN/MONITOR: 리미터 전 샘플 피크. 미지정 앱은 MAIN에 포함됩니다." = "CH: after EQ, level and mute; before MASTER and output routing. MAIN/MONITOR: pre-limiter sample peaks. Unassigned apps are included in MAIN.";
+"OVER: 최고 피크 초과 기록 · LIMIT: 현재 리미터 감쇄" = "OVER: recorded peak above 0 dBFS · LIMIT: current limiter reduction";
+"오디오 실행 후 최고값을 초기화할 수 있습니다." = "Highest peaks can be reset while audio is running.";
+"중지" = "Stopped";
+"탭 레벨 측정 미지원" = "Tab level measurement unavailable";
