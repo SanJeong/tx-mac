@@ -23,7 +23,7 @@ Requires macOS 26 and Xcode Command Line Tools.
 
 The app follows the macOS default output unless you select a device. If that device disconnects, it returns to the system output. Allow system audio access on first launch. USB carries audio and MIDI; Bluetooth carries MIDI controls only.
 
-Keep **USB 12 IN** selected. Enable **TX-6 USB channel meters** in settings to send app audio, including Chrome-wide audio, to the six stereo inputs while listening through the Mac or AirPlay. Separate meter mirroring is unavailable in individual Chrome tab mode or when TX-6 is selected as an audio output. Mac mixing continues if the meter connection fails.
+Keep **USB 12 IN** selected. Enable **TX-6 USB channel meters** in settings to send app audio, including Chrome-wide audio, to the six stereo inputs while listening through the Mac or AirPlay. This meter feed has a +3 dB boost with peak limiting; Mac main and monitor levels are unchanged. Separate meter mirroring is unavailable in individual Chrome tab mode or when TX-6 is selected as an audio output. Mac mixing continues if the meter connection fails.
 
 Meters show signal level, not the master volume number. The TX-6’s own faders still affect its USB mix return.
 
