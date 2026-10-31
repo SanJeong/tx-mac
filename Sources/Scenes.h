@@ -17,7 +17,11 @@ typedef NS_ENUM(NSInteger, TXSceneErrorCode) {
 @property(nonatomic,readonly) BOOL readOnly;
 - (instancetype)initWithDefaults:(NSUserDefaults*)defaults;
 - (BOOL)reload:(NSError * _Nullable * _Nullable)error;
+// Canonical snapshots are v2; reading v1 never writes defaults.
 + (nullable NSDictionary*)canonicalSnapshot:(id)value error:(NSError * _Nullable * _Nullable)error;
++ (nullable NSDictionary<NSString*,NSDictionary*>*)canonicalAppGroups:(id)value error:(NSError * _Nullable * _Nullable)error;
++ (nullable NSArray<NSString*>*)bundleIDsForAssignment:(NSString*)assignment appGroups:(NSDictionary*)appGroups error:(NSError * _Nullable * _Nullable)error;
++ (BOOL)validateAssignments:(NSArray*)assignments appGroups:(NSDictionary*)appGroups chromeTabs:(BOOL)chromeTabs error:(NSError * _Nullable * _Nullable)error;
 + (BOOL)snapshot:(NSDictionary*)a equals:(NSDictionary*)b;
 - (nullable NSDictionary*)sceneWithID:(NSString*)sceneID;
 - (nullable NSDictionary*)addSceneNamed:(NSString*)name snapshot:(NSDictionary*)snapshot error:(NSError * _Nullable * _Nullable)error;

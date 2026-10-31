@@ -32,6 +32,34 @@ static NSString *TXSceneID(id value) {
     return [[[NSUUID alloc] initWithUUIDString:value] UUIDString];
 }
 
+static BOOL TXSceneNativeBundleID(id value) {
+    if(![value isKindOfClass:NSString.class]||![value length]||[value isEqual:TXSceneSystemKey])return NO;
+    NSMutableCharacterSet *invalid=[NSCharacterSet.whitespaceAndNewlineCharacterSet mutableCopy];
+    [invalid formUnionWithCharacterSet:NSCharacterSet.controlCharacterSet];[invalid addCharactersInString:@":/"];
+    return [value rangeOfCharacterFromSet:invalid].location==NSNotFound;
+}
+static NSArray *TXSceneResolveAssignment(NSString *assignment,NSDictionary *groups,NSError **error) {
+    if(![assignment isKindOfClass:NSString.class]){TXSceneFail(error,TXSceneErrorInvalidData,@"Invalid channel assignment.");return nil;}
+    if([assignment hasPrefix:@"app-group:"]){
+        NSString *groupID=TXSceneID([assignment substringFromIndex:10]);NSDictionary *group=groupID?groups[groupID]:nil;
+        if(!group){TXSceneFail(error,TXSceneErrorInvalidData,@"Channel references an unknown app group.");return nil;}return group[@"bundleIDs"];
+    }
+    if(!assignment.length||[assignment isEqual:TXSceneSystemKey]||[assignment hasPrefix:@"pid:"]||[assignment hasPrefix:@"chrome-tab:"])return @[];
+    return @[[assignment copy]];
+}
+static BOOL TXSceneValidateOwnership(NSArray *assignments,NSDictionary *groups,BOOL chromeTabs,NSError **error) {
+    if(![assignments isKindOfClass:NSArray.class]||assignments.count!=6||![assignments[0] isEqual:TXSceneSystemKey])return TXSceneFail(error,TXSceneErrorInvalidData,@"Six assignments with system sounds on channel one are required.");
+    NSMutableSet *owned=[NSMutableSet set];
+    for(NSUInteger i=1;i<6;i++){
+        id assignment=assignments[i];
+        if(![assignment isKindOfClass:NSString.class]||[assignment isEqual:TXSceneSystemKey])return TXSceneFail(error,TXSceneErrorInvalidData,@"Invalid channel assignment.");
+        if([assignment hasPrefix:@"chrome-tab:"]&&!chromeTabs)return TXSceneFail(error,TXSceneErrorInvalidData,@"Chrome tabs require tab mode.");
+        NSArray *members=TXSceneResolveAssignment(assignment,groups,error);if(!members)return NO;
+        if(chromeTabs&&[assignment hasPrefix:@"app-group:"]&&[members containsObject:@"com.google.Chrome"])return TXSceneFail(error,TXSceneErrorInvalidData,@"Chrome cannot belong to an active group while tab mode is enabled.");
+        for(NSString *member in members){if([owned containsObject:member])return TXSceneFail(error,TXSceneErrorInvalidData,@"An app cannot be owned by multiple active channels.");[owned addObject:member];}
+    }return YES;
+}
+
 @interface TXSceneStore ()
 @property(nonatomic,strong) NSUserDefaults *defaults;
 @property(nonatomic,readwrite,copy) NSArray<NSDictionary*> *scenes;
@@ -42,26 +70,65 @@ static NSString *TXSceneID(id value) {
 - (instancetype)initWithDefaults:(NSUserDefaults*)defaults {
     if((self=[super init])){_defaults=defaults;_scenes=@[];[self reload:NULL];}return self;
 }
++ (NSDictionary*)canonicalAppGroups:(id)value error:(NSError**)error {
+    if(error)*error=nil;
+    if(![value isKindOfClass:NSDictionary.class]){TXSceneFail(error,TXSceneErrorInvalidData,@"App groups must be a dictionary.");return nil;}
+    if([value count]>16){TXSceneFail(error,TXSceneErrorLimitReached,@"At most 16 app groups can be saved.");return nil;}
+    NSMutableDictionary *clean=[NSMutableDictionary dictionary];NSMutableArray *names=[NSMutableArray array];
+    for(id rawID in value){NSString *groupID=TXSceneID(rawID);id group=value[rawID];
+        if(!groupID||clean[groupID]||![group isKindOfClass:NSDictionary.class]){TXSceneFail(error,TXSceneErrorInvalidData,@"Invalid or duplicate app group ID.");return nil;}
+        NSString *name=TXSceneName(group[@"name"],error);if(!name)return nil;
+        for(NSString *existing in names)if([existing caseInsensitiveCompare:name]==NSOrderedSame){TXSceneFail(error,TXSceneErrorDuplicateName,@"App group names must be unique.");return nil;}
+        id members=group[@"bundleIDs"];
+        if(![members isKindOfClass:NSArray.class]||[members count]<1||[members count]>32){TXSceneFail(error,TXSceneErrorInvalidData,@"App groups require 1 to 32 native apps.");return nil;}
+        NSMutableSet *unique=[NSMutableSet set];
+        for(id member in members){if(!TXSceneNativeBundleID(member)||[unique containsObject:member]){TXSceneFail(error,TXSceneErrorInvalidData,@"App group members must be unique native bundle IDs.");return nil;}[unique addObject:[member copy]];}
+        NSArray *sorted=[[unique allObjects] sortedArrayUsingSelector:@selector(compare:)];
+        clean[groupID]=@{@"name":name,@"bundleIDs":sorted};[names addObject:name];
+    }return [clean copy];
+}
++ (NSArray<NSString*>*)bundleIDsForAssignment:(NSString*)assignment appGroups:(NSDictionary*)appGroups error:(NSError**)error {
+    NSDictionary *groups=[self canonicalAppGroups:appGroups error:error];if(!groups)return nil;
+    return TXSceneResolveAssignment(assignment,groups,error);
+}
++ (BOOL)validateAssignments:(NSArray*)assignments appGroups:(NSDictionary*)appGroups chromeTabs:(BOOL)chromeTabs error:(NSError**)error {
+    NSDictionary *groups=[self canonicalAppGroups:appGroups error:error];if(!groups)return NO;
+    return TXSceneValidateOwnership(assignments,groups,chromeTabs,error);
+}
 + (NSDictionary*)canonicalSnapshot:(id)value error:(NSError**)error {
     if(error)*error=nil;
     if(![value isKindOfClass:NSDictionary.class]){TXSceneFail(error,TXSceneErrorInvalidData,@"Scene snapshot must be a dictionary.");return nil;}
     NSDictionary *source=value;
     if(!TXSceneInteger(source[@"version"],1,NSIntegerMax)){TXSceneFail(error,TXSceneErrorInvalidData,@"Invalid snapshot version.");return nil;}
-    if([source[@"version"] integerValue]!=1){TXSceneFail(error,TXSceneErrorUnsupportedVersion,@"Unsupported snapshot version.");return nil;}
+    NSInteger version=[source[@"version"] integerValue];
+    if(version!=1&&version!=2){TXSceneFail(error,TXSceneErrorUnsupportedVersion,@"Unsupported snapshot version.");return nil;}
+    NSDictionary *groups=@{};
+    if(version==2){groups=[self canonicalAppGroups:source[@"appGroups"] error:error];if(!groups)return nil;}
+    else if(source[@"appGroups"]){
+        NSDictionary *legacyGroups=[self canonicalAppGroups:source[@"appGroups"] error:error];
+        if(!legacyGroups)return nil;
+        if(legacyGroups.count){TXSceneFail(error,TXSceneErrorInvalidData,@"Version one snapshots cannot contain app groups.");return nil;}
+    }
     id assignments=source[@"assignments"],channels=source[@"channels"],pending=source[@"pendingSources"];
     if(![assignments isKindOfClass:NSArray.class]||[assignments count]!=6||![channels isKindOfClass:NSArray.class]||[channels count]!=6||(pending&&(![pending isKindOfClass:NSArray.class]||[pending count]!=6))){TXSceneFail(error,TXSceneErrorInvalidData,@"Scenes require six assignments and channels.");return nil;}
     if(!TXSceneBoolean(source[@"followDefaultOutput"])||!TXSceneBoolean(source[@"chromeTabs"])||![source[@"outputUID"] isKindOfClass:NSString.class]||![source[@"monitorUID"] isKindOfClass:NSString.class]||(source[@"monitorName"]&&![source[@"monitorName"] isKindOfClass:NSString.class])||!TXSceneNumber(source[@"monitorGain"],0,1)){TXSceneFail(error,TXSceneErrorInvalidData,@"Invalid scene output settings.");return nil;}
     NSMutableArray *cleanAssignments=[NSMutableArray arrayWithCapacity:6],*cleanChannels=[NSMutableArray arrayWithCapacity:6],*cleanPending=[NSMutableArray arrayWithCapacity:6];
-    NSMutableSet *apps=[NSMutableSet set];
+    NSMutableDictionary *referencedGroups=[NSMutableDictionary dictionary];
     for(NSUInteger i=0;i<6;i++) {
         id assignment=assignments[i],channel=channels[i],intent=pending?pending[i]:@"";
         if(![assignment isKindOfClass:NSString.class]||![intent isKindOfClass:NSString.class]||![@[@"",@"tab",@"process"] containsObject:intent]||![channel isKindOfClass:NSDictionary.class]){TXSceneFail(error,TXSceneErrorInvalidData,@"Invalid scene channel data.");return nil;}
+        if([assignment hasPrefix:@"app-group:"]){
+            if(version==1){TXSceneFail(error,TXSceneErrorInvalidData,@"Version one snapshots cannot reference app groups.");return nil;}
+            NSString *groupID=TXSceneID([assignment substringFromIndex:10]);
+            if(!groupID||!groups[groupID]){TXSceneFail(error,TXSceneErrorInvalidData,@"Channel references an unknown app group.");return nil;}
+            assignment=[@"app-group:" stringByAppendingString:groupID];
+            if(i>0)referencedGroups[groupID]=groups[groupID];
+        }
         if(i==0){assignment=TXSceneSystemKey;intent=@"";}
         else if([assignment isEqualToString:TXSceneSystemKey]){TXSceneFail(error,TXSceneErrorInvalidData,@"System sounds must use channel one.");return nil;}
         else if([assignment hasPrefix:@"chrome-tab:"]){assignment=@"";intent=@"tab";}
         else if([assignment hasPrefix:@"pid:"]){assignment=@"";intent=@"process";}
         if(([intent isEqualToString:@"tab"]&&![source[@"chromeTabs"] boolValue])||([assignment length]&&[intent length])){TXSceneFail(error,TXSceneErrorInvalidData,@"Invalid pending source intent.");return nil;}
-        if([assignment length]){if([apps containsObject:assignment]){TXSceneFail(error,TXSceneErrorInvalidData,@"An app cannot occupy multiple scene channels.");return nil;}[apps addObject:assignment];}
         id eq=channel[@"eq"];
         if(!TXSceneNumber(channel[@"gain"],0,1)||!TXSceneBoolean(channel[@"muted"])||!TXSceneInteger(channel[@"route"],0,3)||![eq isKindOfClass:NSArray.class]||[eq count]!=3){TXSceneFail(error,TXSceneErrorInvalidData,@"Invalid channel controls.");return nil;}
         NSMutableArray *cleanEQ=[NSMutableArray arrayWithCapacity:3];
@@ -69,7 +136,8 @@ static NSString *TXSceneID(id value) {
         [cleanAssignments addObject:[assignment copy]];[cleanPending addObject:[intent copy]];
         [cleanChannels addObject:@{@"gain":@([channel[@"gain"] doubleValue]),@"eq":[cleanEQ copy],@"muted":@([channel[@"muted"] boolValue]),@"route":@([channel[@"route"] integerValue])}];
     }
-    NSMutableDictionary *result=[@{@"version":@1,@"assignments":[cleanAssignments copy],@"channels":[cleanChannels copy],@"pendingSources":[cleanPending copy],@"followDefaultOutput":@([source[@"followDefaultOutput"] boolValue]),@"outputUID":[source[@"followDefaultOutput"] boolValue]?@"":[source[@"outputUID"] copy],@"monitorUID":[source[@"monitorUID"] copy],@"monitorGain":@([source[@"monitorGain"] doubleValue]),@"chromeTabs":@([source[@"chromeTabs"] boolValue])} mutableCopy];
+    if(!TXSceneValidateOwnership(cleanAssignments,groups,[source[@"chromeTabs"] boolValue],error))return nil;
+    NSMutableDictionary *result=[@{@"version":@2,@"appGroups":[referencedGroups copy],@"assignments":[cleanAssignments copy],@"channels":[cleanChannels copy],@"pendingSources":[cleanPending copy],@"followDefaultOutput":@([source[@"followDefaultOutput"] boolValue]),@"outputUID":[source[@"followDefaultOutput"] boolValue]?@"":[source[@"outputUID"] copy],@"monitorUID":[source[@"monitorUID"] copy],@"monitorGain":@([source[@"monitorGain"] doubleValue]),@"chromeTabs":@([source[@"chromeTabs"] boolValue])} mutableCopy];
     if(source[@"monitorName"])result[@"monitorName"]=[source[@"monitorName"] copy];
     return [result copy];
 }
@@ -168,11 +236,84 @@ static NSDictionary *TXSceneCheckSnapshot(void) {
     NSDictionary *channel=@{@"gain":@1,@"eq":@[@0,@0,@0],@"muted":@NO,@"route":@0};
     return @{@"version":@1,@"assignments":@[TXSceneSystemKey,@"com.apple.Music",@"",@"",@"",@""],@"channels":@[channel,channel,channel,channel,channel,channel],@"followDefaultOutput":@YES,@"outputUID":@"old-output",@"monitorUID":@"monitor",@"monitorName":@"Speakers",@"monitorGain":@0.5,@"chromeTabs":@NO};
 }
+static void TXRunSceneGroupSelfCheck(void (^check)(BOOL,NSString*)) {
+    NSDictionary *v1=TXSceneCheckSnapshot();NSError *error=nil;
+    NSMutableDictionary *v2=[v1 mutableCopy];v2[@"version"]=@2;v2[@"appGroups"]=@{};
+    check([TXSceneStore snapshot:v1 equals:v2],@"v1 and empty v2 are semantically equal");
+    NSMutableDictionary *hugeVersion=[v1 mutableCopy];hugeVersion[@"version"]=@((double)NSIntegerMax);
+    check(![TXSceneStore canonicalSnapshot:hugeVersion error:&error]&&error.code==TXSceneErrorUnsupportedVersion,@"large future snapshot version is rejected");
+    NSDictionary *legacyEntry=@{@"id":NSUUID.UUID.UUIDString,@"name":@"Legacy",@"snapshot":v1};
+    NSDictionary *legacyContainer=@{@"version":@1,@"entries":@[legacyEntry]};
+    TXSceneMemoryDefaults *legacyMemory=[TXSceneMemoryDefaults new];legacyMemory.stored=legacyContainer;
+    TXSceneStore *legacyStore=[[TXSceneStore alloc] initWithDefaults:(NSUserDefaults*)(id)legacyMemory];
+    check(!legacyStore.readOnly&&legacyMemory.writes==0&&legacyMemory.stored==legacyContainer&&[legacyStore.scenes[0][@"snapshot"][@"version"] isEqual:@2],@"legacy reload upgrades only memory");
+    check([legacyStore renameSceneID:legacyEntry[@"id"] name:@"Upgraded" error:&error]&&legacyMemory.writes==1&&[legacyMemory.stored[@"version"] isEqual:@1]&&[legacyMemory.stored[@"entries"][0][@"snapshot"][@"version"] isEqual:@2],@"explicit mutation saves v2 inside v1 container");
+    NSString *groupA=@"A67AEE01-438A-4CD5-9D89-57E47D2F3E01",*groupB=@"B67AEE01-438A-4CD5-9D89-57E47D2F3E02";
+    NSString *tokenA=[@"app-group:" stringByAppendingString:groupA],*tokenB=[@"app-group:" stringByAppendingString:groupB];
+    NSMutableString *groupName=[@" Cafe\u0301 " mutableCopy],*nativeID=[@"org.closed.Z" mutableCopy];
+    NSMutableArray *members=[NSMutableArray arrayWithObjects:nativeID,@"org.closed.A",nil];
+    NSMutableDictionary *group=[@{@"name":groupName,@"bundleIDs":members,@"privateTitle":@"discard"} mutableCopy];
+    NSMutableDictionary *library=[@{groupA.lowercaseString:group,groupB:@{@"name":@"Other",@"bundleIDs":@[@"org.closed.Z"]}} mutableCopy];
+    NSDictionary *clean=[TXSceneStore canonicalAppGroups:library error:&error];
+    check(clean&&[clean[groupA][@"name"] isEqual:@"Café"]&&[clean[groupA][@"bundleIDs"] isEqual:@[@"org.closed.A",@"org.closed.Z"]]&&!clean[groupA][@"privateTitle"],@"group IDs names and stable members canonicalized");
+    [groupName appendString:@" changed"];[nativeID appendString:@" changed"];[members removeAllObjects];[group removeAllObjects];[library removeAllObjects];
+    check([clean[groupA][@"name"] isEqual:@"Café"]&&[clean[groupA][@"bundleIDs"] isEqual:@[@"org.closed.A",@"org.closed.Z"]],@"app groups are deeply immutable");
+    NSDictionary *definition=@{@"name":@"Desk",@"bundleIDs":@[@"org.closed.Z",@"org.closed.A"]};
+    NSDictionary *groups=@{groupA:definition,groupB:@{@"name":@"Overlap",@"bundleIDs":@[@"org.closed.Z"]}};
+    v2[@"appGroups"]=groups;v2[@"assignments"]=@[TXSceneSystemKey,tokenA.lowercaseString,@"",@"",@"",@""];
+    NSDictionary *snapshot=[TXSceneStore canonicalSnapshot:v2 error:&error];
+    check(snapshot&&[snapshot[@"appGroups"] count]==1&&snapshot[@"appGroups"][groupA]&&[snapshot[@"assignments"][1] isEqual:tokenA],@"only referenced groups embedded and tokens normalized");
+    check([[TXSceneStore bundleIDsForAssignment:tokenA appGroups:groups error:&error] isEqual:@[@"org.closed.A",@"org.closed.Z"]],@"group resolver returns sorted native members");
+    check([[TXSceneStore bundleIDsForAssignment:@"closed.native.app" appGroups:groups error:&error] isEqual:@[@"closed.native.app"]],@"native resolver retains closed apps");
+    for(NSString *special in @[@"",TXSceneSystemKey,@"pid:123",@"chrome-tab:private"])
+        check([TXSceneStore bundleIDsForAssignment:special appGroups:groups error:&error].count==0,@"non-native resolver returns no bundle IDs");
+    check(![TXSceneStore bundleIDsForAssignment:@"app-group:unknown" appGroups:groups error:&error]&&error.code==TXSceneErrorInvalidData,@"dangling resolver fails");
+    check([TXSceneStore validateAssignments:v2[@"assignments"] appGroups:groups chromeTabs:NO error:&error],@"unreferenced overlapping groups allowed");
+    for(NSArray *assignments in @[@[TXSceneSystemKey,tokenA,tokenB,@"",@"",@""],@[TXSceneSystemKey,tokenA,@"org.closed.A",@"",@"",@""],@[TXSceneSystemKey,@"org.closed.A",tokenA,@"",@"",@""],@[TXSceneSystemKey,tokenA,tokenA,@"",@"",@""]]){
+        v2[@"assignments"]=assignments;check(![TXSceneStore canonicalSnapshot:v2 error:&error]&&![TXSceneStore validateAssignments:assignments appGroups:groups chromeTabs:NO error:&error],@"active native and group ownership cannot overlap");
+    }
+    check(![TXSceneStore validateAssignments:@[] appGroups:groups chromeTabs:NO error:&error]&&![TXSceneStore validateAssignments:@[@"",@"",@"",@"",@"",@""] appGroups:groups chromeTabs:NO error:&error],@"assignment helper requires fixed six slots");
+    v2[@"assignments"]=@[TXSceneSystemKey,tokenB,@"",@"",@"",@""];v2[@"appGroups"]=@{groupA:definition};
+    check(![TXSceneStore canonicalSnapshot:v2 error:&error],@"snapshot dangling group rejected");
+    NSMutableDictionary *legacyGroupSnapshot=[v1 mutableCopy];legacyGroupSnapshot[@"assignments"]=@[TXSceneSystemKey,tokenA,@"",@"",@"",@""];legacyGroupSnapshot[@"appGroups"]=@{groupA:definition};
+    check(![TXSceneStore canonicalSnapshot:legacyGroupSnapshot error:&error],@"v1 cannot silently drop group definitions");
+    [legacyGroupSnapshot removeObjectForKey:@"appGroups"];check(![TXSceneStore canonicalSnapshot:legacyGroupSnapshot error:&error],@"v1 cannot silently drop group token");
+    NSDictionary *chromeGroups=@{groupA:@{@"name":@"Browser",@"bundleIDs":@[@"com.google.Chrome"]}};
+    v2[@"appGroups"]=chromeGroups;v2[@"assignments"]=@[TXSceneSystemKey,tokenA,@"",@"",@"",@""];v2[@"chromeTabs"]=@NO;
+    check([TXSceneStore canonicalSnapshot:v2 error:&error]!=nil,@"Chrome group allowed in aggregate mode");
+    v2[@"chromeTabs"]=@YES;check(![TXSceneStore canonicalSnapshot:v2 error:&error]&&![TXSceneStore validateAssignments:v2[@"assignments"] appGroups:chromeGroups chromeTabs:YES error:&error],@"active Chrome group conflicts with tabs");
+    v2[@"assignments"]=v1[@"assignments"];check([TXSceneStore canonicalSnapshot:v2 error:&error]!=nil,@"unreferenced Chrome group does not conflict with tabs");
+    NSArray *badMembers=@[@[],@[@"duplicate.app",@"duplicate.app"],@[@1],@[@""],@[@"contains space"],@[@"https://private"],@[TXSceneSystemKey],@[@"pid:99"],@[@"chrome-tab:private"],@[tokenA]];
+    for(NSArray *bad in badMembers)check(![TXSceneStore canonicalAppGroups:@{groupA:@{@"name":@"Bad",@"bundleIDs":bad}} error:&error],@"invalid and reserved group members rejected");
+    NSMutableArray *manyMembers=[NSMutableArray array];for(NSUInteger i=0;i<32;i++)[manyMembers addObject:[NSString stringWithFormat:@"org.closed.%lu",(unsigned long)i]];
+    check([TXSceneStore canonicalAppGroups:@{groupA:@{@"name":@"Boundary",@"bundleIDs":manyMembers}} error:&error]!=nil,@"32 group members allowed");[manyMembers addObject:@"org.closed.overflow"];
+    check(![TXSceneStore canonicalAppGroups:@{groupA:@{@"name":@"Boundary",@"bundleIDs":manyMembers}} error:&error],@"33 group members rejected");
+    for(NSString *badName in @[@"",@"  ",@"bad\nname",[@"x" stringByPaddingToLength:33 withString:@"x" startingAtIndex:0]])check(![TXSceneStore canonicalAppGroups:@{groupA:@{@"name":badName,@"bundleIDs":@[@"native.app"]}} error:&error]&&error.code==TXSceneErrorInvalidName,@"group name constraints");
+    check(![TXSceneStore canonicalAppGroups:@{groupA:@{@"name":@"Café",@"bundleIDs":@[@"app.A"]},groupB:@{@"name":@"CAFE\u0301",@"bundleIDs":@[@"app.B"]}} error:&error]&&error.code==TXSceneErrorDuplicateName,@"group names unique after case and NFC normalization");
+    check(![TXSceneStore canonicalAppGroups:@{groupA:definition,groupA.lowercaseString:definition} error:&error],@"duplicate normalized group UUID rejected");
+    check(![TXSceneStore canonicalAppGroups:@{@"bad-id":definition} error:&error]&&![TXSceneStore canonicalAppGroups:@[] error:&error]&&![TXSceneStore canonicalAppGroups:@{groupA:@"bad"} error:&error],@"invalid group root and IDs rejected");
+    NSMutableDictionary *manyGroups=[NSMutableDictionary dictionary];for(NSUInteger i=0;i<16;i++)manyGroups[NSUUID.UUID.UUIDString]=@{@"name":[NSString stringWithFormat:@"Group %lu",(unsigned long)i],@"bundleIDs":@[@"overlap.allowed"]};
+    check([TXSceneStore canonicalAppGroups:manyGroups error:&error]!=nil,@"16 overlapping library groups allowed");manyGroups[NSUUID.UUID.UUIDString]=@{@"name":@"Overflow",@"bundleIDs":@[@"app.extra"]};
+    check(![TXSceneStore canonicalAppGroups:manyGroups error:&error]&&error.code==TXSceneErrorLimitReached,@"17 group limit");
+    TXSceneMemoryDefaults *memory=[TXSceneMemoryDefaults new];TXSceneStore *store=[[TXSceneStore alloc] initWithDefaults:(NSUserDefaults*)(id)memory];
+    NSDictionary *sceneA=[store addSceneNamed:@"First" snapshot:snapshot error:&error];
+    NSMutableDictionary *second=[snapshot mutableCopy];second[@"appGroups"]=@{groupA:@{@"name":@"Desk changed",@"bundleIDs":@[@"independent.app"]}};
+    NSDictionary *sceneB=[store addSceneNamed:@"Second" snapshot:second error:&error];
+    TXSceneStore *reloaded=[[TXSceneStore alloc] initWithDefaults:(NSUserDefaults*)(id)memory];
+    check(sceneA&&sceneB&&[reloaded.scenes isEqual:store.scenes]&&[sceneA[@"snapshot"][@"appGroups"][groupA][@"bundleIDs"] isEqual:@[@"org.closed.A",@"org.closed.Z"]]&&[sceneB[@"snapshot"][@"appGroups"][groupA][@"bundleIDs"] isEqual:@[@"independent.app"]],@"v2 scene definitions roundtrip independently");
+    check(![TXSceneStore snapshot:sceneA[@"snapshot"] equals:sceneB[@"snapshot"]],@"changed embedded group changes semantic snapshot");
+    NSMutableDictionary *dangling=[snapshot mutableCopy];dangling[@"appGroups"]=@{};NSDictionary *broken=@{@"version":@1,@"entries":@[@{@"id":NSUUID.UUID.UUIDString,@"name":@"Broken",@"snapshot":dangling}]};
+    TXSceneMemoryDefaults *brokenMemory=[TXSceneMemoryDefaults new];brokenMemory.stored=broken;TXSceneStore *blocked=[[TXSceneStore alloc] initWithDefaults:(NSUserDefaults*)(id)brokenMemory];
+    check(blocked.readOnly&&![blocked addSceneNamed:@"Never" snapshot:snapshot error:&error]&&brokenMemory.stored==broken&&brokenMemory.writes==0,@"orphan group storage preserved read only");
+}
+
 BOOL TXRunSceneStoreSelfCheck(void) {
     __block BOOL ok=YES;
     void (^check)(BOOL,NSString*)=^(BOOL success,NSString *label){if(!success){fprintf(stderr,"Scene self-check failed: %s\n",label.UTF8String);ok=NO;}};
+    TXRunSceneGroupSelfCheck(check);
     NSDictionary *snapshot=TXSceneCheckSnapshot();NSError *error=nil;
     NSDictionary *canonical=[TXSceneStore canonicalSnapshot:snapshot error:&error];check(canonical!=nil&&!error,@"canonical valid snapshot");
+    check([canonical[@"version"] isEqual:@2]&&[canonical[@"appGroups"] isEqual:@{}],@"v1 snapshots upgrade in memory to v2");
     TXSceneMemoryDefaults *memory=[TXSceneMemoryDefaults new];TXSceneStore *store=[[TXSceneStore alloc] initWithDefaults:(NSUserDefaults*)(id)memory];
     check(!store.readOnly&&store.scenes.count==0&&memory.writes==0,@"missing storage does not write");
     NSDictionary *first=[store addSceneNamed:@"  Work  " snapshot:snapshot error:&error],*second=[store addSceneNamed:@"Travel" snapshot:snapshot error:&error];
@@ -196,7 +337,7 @@ BOOL TXRunSceneStoreSelfCheck(void) {
     check(![store restoreEntry:deleted atIndex:0 error:&error]&&memory.writes==writes,@"duplicate ID restore unchanged");
     while(store.scenes.count<16)[store addSceneNamed:[NSString stringWithFormat:@"Scene %lu",(unsigned long)store.scenes.count] snapshot:snapshot error:&error];
     writes=memory.writes;check(![store addSceneNamed:@"Overflow" snapshot:snapshot error:&error]&&error.code==TXSceneErrorLimitReached&&memory.writes==writes,@"16 scene limit");
-    NSMutableDictionary *extra=[snapshot mutableCopy];extra[@"master"]=@0;extra[@"masterMuted"]=@YES;extra[@"midi"]=@"secret";extra[@"language"]=@"ko";extra[@"autoStart"]=@YES;extra[@"permissions"]=@{};
+    NSMutableDictionary *extra=[snapshot mutableCopy];extra[@"master"]=@0;extra[@"masterMuted"]=@YES;extra[@"midi"]=@"secret";extra[@"language"]=@"ko";extra[@"autoStart"]=@YES;extra[@"permissions"]=@{};extra[@"fx2"]=@YES;extra[@"fx2Type"]=@3;
     NSDictionary *safe=[TXSceneStore canonicalSnapshot:extra error:&error];check([safe isEqual:canonical]&&[safe[@"outputUID"] isEqual:@""],@"global settings excluded and follow default canonical UID");
     extra=[snapshot mutableCopy];extra[@"monitorName"]=@"스피커";extra[@"outputUID"]=@"new-output";check([TXSceneStore snapshot:snapshot equals:extra],@"metadata and default UID do not dirty");extra[@"monitorGain"]=@0.2;check(![TXSceneStore snapshot:snapshot equals:extra],@"control differences dirty");
     extra=[snapshot mutableCopy];extra[@"assignments"]=@[@"wrong",@"chrome-tab:private-URL",@"pid:1234",@"closed.native.app",@"",@""];extra[@"chromeTabs"]=@YES;
@@ -221,7 +362,7 @@ BOOL TXRunSceneStoreSelfCheck(void) {
     check(![mutableStore addSceneNamed:@"Invalid" snapshot:invalidSnapshot error:&error]&&![mutableStore updateSceneID:immutable[@"id"] snapshot:invalidSnapshot error:&error]&&![mutableStore renameSceneID:immutable[@"id"] name:@"" error:&error]&&mutableStore.scenes==beforeInvalid&&mutableMemory.writes==writes,@"invalid mutations have no side effects");
     NSMutableDictionary *invalidRestore=[deleted mutableCopy];invalidRestore[@"id"]=@"bad";
     check(![mutableStore restoreEntry:invalidRestore atIndex:0 error:&error]&&mutableMemory.writes==writes,@"invalid restore ID");
-    extra=[snapshot mutableCopy];extra[@"version"]=@2;check(![TXSceneStore canonicalSnapshot:extra error:&error]&&error.code==TXSceneErrorUnsupportedVersion,@"future snapshot version");
+    extra=[snapshot mutableCopy];extra[@"version"]=@3;check(![TXSceneStore canonicalSnapshot:extra error:&error]&&error.code==TXSceneErrorUnsupportedVersion,@"future snapshot version");
     NSDictionary *invalidEntry=@{@"id":@"bad",@"name":@"Bad",@"snapshot":snapshot};
     NSArray *badContainers=@[@"corrupt",@{},@{@"version":@YES,@"entries":@[]},@{@"version":@2,@"entries":@[]},@{@"version":@1,@"entries":@"bad"},@{@"version":@1,@"entries":@[invalidEntry]},@{@"version":@1,@"entries":@[immutable,immutable]},@{@"version":@1,@"entries":@[@{@"id":NSUUID.UUID.UUIDString,@"name":@"Future",@"snapshot":extra}]}];
     for(id bad in badContainers){TXSceneMemoryDefaults *broken=[TXSceneMemoryDefaults new];broken.stored=bad;TXSceneStore *blocked=[[TXSceneStore alloc] initWithDefaults:(NSUserDefaults*)(id)broken];check(blocked.readOnly&&![blocked reload:&error]&&error!=nil,@"corrupt storage read only with error");check(![blocked addSceneNamed:@"Safe" snapshot:snapshot error:&error]&&error.code==TXSceneErrorReadOnly&&![blocked updateSceneID:firstID snapshot:snapshot error:&error]&&![blocked renameSceneID:firstID name:@"Safe" error:&error]&&![blocked removeSceneID:firstID error:&error]&&![blocked restoreEntry:immutable atIndex:0 error:&error]&&broken.writes==0&&broken.stored==bad,@"read only mutations preserve original defaults");broken.stored=nil;check([blocked reload:&error]&&!blocked.readOnly&&blocked.scenes.count==0&&broken.writes==0,@"reload recovers after explicit removal");}
