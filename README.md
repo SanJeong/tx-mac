@@ -4,7 +4,7 @@ A macOS mixer controlled with a teenage engineering TX-6 over USB or Bluetooth M
 
 ![tx-mac](assets/mixer.png)
 
-Requires macOS 26 and Xcode Command Line Tools.
+Requires macOS 26. Building requires Xcode Command Line Tools.
 
 ```sh
 ./install.command
@@ -18,21 +18,24 @@ Requires macOS 26 and Xcode Command Line Tools.
 | MIDI → CTRL | OUT |
 | BLE | ACCEPT for wireless MIDI |
 | SOLO | MUTE |
+| VU METER | PRE |
 | SYNTH | OFF |
 | DJ | OFF |
 
-The app follows the macOS default output unless you select a device. If that device disconnects, it returns to the system output. Allow system audio access on first launch. USB carries audio and MIDI; Bluetooth carries MIDI controls only.
+Allow system audio access on first launch. MAIN follows the Mac's default output unless you select a device. Bluetooth carries MIDI controls only.
 
-Keep **USB 12 IN** selected. Enable **TX-6 USB channel meters** in settings to send app audio, including Chrome-wide audio, to the six stereo inputs while listening through the Mac or AirPlay. This meter feed has a +3 dB boost with peak limiting; Mac main and monitor levels are unchanged. Separate meter mirroring is unavailable in individual Chrome tab mode or when TX-6 is selected as an audio output. Mac mixing continues if the meter connection fails.
+Keep **USB 12 IN** selected. Optional USB channel meters mirror six app channels while listening through the Mac or AirPlay. The feed has a +3 dB boost with peak limiting; MAIN and MONITOR are unchanged. Mirroring is unavailable for individual Chrome tabs or when TX-6 is an audio output.
 
-Meters show signal level, not the master volume number. The TX-6’s own faders still affect its USB mix return.
+Meters show signal level, not the master number. TX-6's own faders still affect its USB mix return.
 
-Choose a separate MONITOR output and set each channel to Main, Monitor, Both or Off. Preview follows EQ, fader, channel mute and master volume. FX2 silences both outputs. A disconnected monitor stays silent until the same device returns.
+Choose a MONITOR device and set each channel to Main, Monitor, Both or Off. Preview follows EQ, fader, mute and master. FX1 unmutes master; FX2 mutes both outputs. A disconnected monitor stays silent.
 
-TX-6 audio output currently uses one stereo pair. Independent six-track output routing and native AUX/CUE control are still under investigation.
+TX-6 audio output uses one stereo pair. Six-track output and native AUX/CUE routing are not supported.
 
-Faders and EQ work when MIDI connects. On the TX-6 home screen, press and release SHIFT to enable the SELECT master knob. FX1 unmutes master; FX2 mutes it. The device's own master value is separate; the setup field aligns the Mac value manually.
+On the TX-6 home screen, press and release SHIFT to enable the SELECT master knob. Align the device's master number manually in setup.
 
-Chrome-wide volume and EQ work without an extension. Enable individual Chrome tab channels in settings to use tabs instead of the Chrome-wide channel. For individual tabs, load `BrowserExtension` in Chrome. Audible tabs are detected automatically; per-tab volume and EQ require the extension button or `Command+Shift+6` once in that tab.
+SCENE saves assignments, levels, EQ, mute and routing, keeping master and FX2 unchanged. Saved scenes wait for unavailable outputs. Create app groups from a channel's app menu. Levels shows sample peaks and limiter activity; Reset clears peak history.
+
+Chrome-wide volume and EQ work without an extension. For individual tabs, load `BrowserExtension` and enable tab mode in settings. Audible tabs appear automatically; tab volume and EQ require the extension button or `Command+Shift+6` once per tab.
 
 Noncommercial use, modification and redistribution are permitted under the [PolyForm Noncommercial License](LICENSE).
