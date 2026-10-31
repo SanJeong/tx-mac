@@ -206,7 +206,8 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
             }
         }
         s->smoothMaster+=smoothing*(master-s->smoothMaster);
-        s->smoothMonitorGain+=smoothing*(monitorTarget-s->smoothMonitorGain);
+        if(monitorTarget>0)s->smoothMonitorGain+=smoothing*(monitorTarget-s->smoothMonitorGain);
+        else s->smoothMonitorGain=0;
         float masterGain=masterMuted?0:s->smoothMaster;
         float monitorGain=monitorTarget>0?s->smoothMonitorGain:0;
         float test=reference?MeterReference(s->meterReferenceFrame,s->sampleRate):0;
@@ -622,7 +623,23 @@ BOOL TXRunSelfCheck(void) {
             for(int c=2;c<12;c++)if(buses[256+12*f+c]!=0)return NO;
         }
     }
-    atomic_store(&routed.route[0],TXOutputMonitor);routed.monitorEnabled=NO;
+    atomic_store(&routed.route[0],TXOutputMonitor);
+    atomic_store(&routed.monitorGain,1);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(fabsf(buses[128]-.1f)>1e-6||fabsf(buses[256]-.1f)>1e-6)return NO;
+    atomic_store(&routed.monitorGain,0);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    for(int f=0;f<64;f++)if(fabsf(buses[2*f]-.2f)>1e-6||fabsf(buses[2*f+1]+.1f)>1e-6||buses[128+2*f]!=0||buses[129+2*f]!=0||buses[256+12*f]!=0||buses[257+12*f]!=0)return NO;
+    atomic_store(&routed.monitorGain,.01f);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    for(int f=0;f<64;f++){
+        if(fabsf(buses[2*f]-.2f)>1e-6||fabsf(buses[2*f+1]+.1f)>1e-6||fabsf(buses[128+2*f])>.001000001f||fabsf(buses[129+2*f])>.000500001f||fabsf(buses[256+12*f])>.001000001f||fabsf(buses[257+12*f])>.000500001f){
+            fprintf(stderr,"Monitor trim zero recovery exceeded .01: monitor=%f mirror=%f\n",buses[128+2*f],buses[256+12*f]);return NO;
+        }
+    }
+    float firstRecovery=.001f*(1-expf(-1/(.015f*48000)));
+    if(fabsf(buses[128]-firstRecovery)>1e-9||fabsf(buses[256]-firstRecovery)>1e-9||buses[254]<=buses[128]||atomic_load(&routed.monitorPeak)>.001000001f||atomic_load(&routed.usbPeak[0])>.001000001f)return NO;
+    routed.monitorEnabled=NO;
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
     if(fabsf(buses[0]-.2f)>1e-6||buses[128]!=0||buses[256]!=0||atomic_load(&routed.monitorPeak)!=0)return NO;
     routed.monitorEnabled=YES;atomic_store(&routed.route[0],TXOutputBoth);atomic_store(&routed.monitorGain,.5f);routed.smoothMonitorGain=.5f;
@@ -637,7 +654,7 @@ BOOL TXRunSelfCheck(void) {
     atomic_store(&routed.monitorGain,0);
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
     if(fabsf(buses[0]-.2f)>1e-6||buses[128]!=0||buses[256]!=0)return NO;
-    atomic_store(&routed.monitorGain,1);routed.smoothMonitorGain=0;
+    atomic_store(&routed.monitorGain,1);
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
     if(fabsf(buses[128]-.1f*(1-expf(-1/(.015f*48000))))>1e-7||buses[254]<=buses[128]||buses[254]>=.1f)return NO;
     routed.smoothMonitorGain=1;atomic_store(&routed.route[0],TXOutputBoth);atomic_store(&routed.muted[0],true);
