@@ -3,6 +3,7 @@
 #import <math.h>
 #import <libproc.h>
 #import <stdarg.h>
+#import <time.h>
 
 static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector selector,AudioObjectPropertyScope scope) {
     return (AudioObjectPropertyAddress){selector,scope,kAudioObjectPropertyElementMain};
@@ -226,6 +227,13 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     for(int t=0;t<s->tapCount;t++)for(int c=0;c<2;c++){
         UInt32 n=0;if(!ChannelPointer(input,s->physicalInputChannels+t*2+c,&in[t][c],&stride[t][c],&n)){atomic_store(&s->layoutFault,3);return noErr;}frames=MIN(frames,n);
     }
+    // Validate live IO while suppressing every output during a protected transition.
+    if(atomic_load(&s->transitionMuted)){
+        for(int slot=0;slot<TX_SLOTS;slot++)atomic_store(&s->peak[slot],0);
+        atomic_store(&s->outputPeak,0);atomic_store(&s->monitorPeak,0);
+        for(int slot=0;slot<6;slot++){atomic_store(&s->usbPeak[slot],0);atomic_store(&s->usbRMS[slot],0);}
+        atomic_fetch_add(&s->callbacks,1);atomic_fetch_add(&s->frames,frames);return noErr;
+    }
     float target[TX_SLOTS],peaks[TX_SLOTS]={0},outputPeak=0,monitorPeak=0,usbPeak[6]={0};
     UInt32 routes[TX_SLOTS];BOOL muted[TX_SLOTS];double usbEnergy[6]={0};
     BOOL reference=atomic_load(&s->meterReference);
@@ -296,6 +304,99 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     for(int slot=0;slot<TX_SLOTS;slot++)atomic_store(&s->peak[slot],peaks[slot]);atomic_store(&s->outputPeak,outputPeak);atomic_store(&s->monitorPeak,monitorPeak);
     for(int slot=0;slot<6;slot++){atomic_store(&s->usbPeak[slot],usbPeak[slot]);atomic_store(&s->usbRMS[slot],frames?sqrt(usbEnergy[slot]/(2*frames)):0);}
     atomic_fetch_add(&s->callbacks,1);atomic_fetch_add(&s->frames,frames);return noErr;
+}
+
+typedef OSStatus (^TXGuardCreate)(CATapDescription*,AudioObjectID*);
+typedef OSStatus (^TXGuardDestroy)(AudioObjectID);
+typedef NSArray<NSNumber*>* (^TXGuardOwners)(NSError**);
+static NSError *GuardError(NSString *stage,OSStatus status) {
+    return [NSError errorWithDomain:@"local.tx6mac.audio-mute-guard" code:status userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"%@: %d",stage,(int)status]}];
+}
+static NSArray<NSNumber*> *GuardOwnProcesses(NSError **error) {
+    AudioObjectPropertyAddress a=Addr(kAudioHardwarePropertyProcessObjectList,kAudioObjectPropertyScopeGlobal);UInt32 size=0;
+    OSStatus status=AudioObjectGetPropertyDataSize(kAudioObjectSystemObject,&a,0,NULL,&size);
+    if(status!=noErr||size%sizeof(AudioObjectID)){if(error)*error=GuardError(@"Process list",status?:kAudioHardwareBadObjectError);return nil;}
+    if(!size)return @[];
+    AudioObjectID *ids=malloc(size);if(!ids){if(error)*error=GuardError(@"Process allocation",kAudioHardwareUnspecifiedError);return nil;}
+    UInt32 capacity=size;status=AudioObjectGetPropertyData(kAudioObjectSystemObject,&a,0,NULL,&size,ids);
+    NSMutableArray *owners=[NSMutableArray array];
+    if(status==noErr&&(size>capacity||size%sizeof(AudioObjectID)))status=kAudioHardwareBadObjectError;
+    if(status==noErr)for(UInt32 i=0;i<size/sizeof(*ids);i++){
+        pid_t pid=0;UInt32 bytes=sizeof(pid);AudioObjectPropertyAddress p=Addr(kAudioProcessPropertyPID,kAudioObjectPropertyScopeGlobal);
+        status=AudioObjectGetPropertyData(ids[i],&p,0,NULL,&bytes,&pid);
+        if(status!=noErr||bytes!=sizeof(pid)){if(status==noErr)status=kAudioHardwareBadObjectError;break;}
+        if(pid==getpid())[owners addObject:@(ids[i])];
+    }
+    free(ids);if(status!=noErr){if(error)*error=GuardError(@"Process ownership",status);return nil;}return owners;
+}
+@interface TXAudioMuteGuard ()
+- (instancetype)initWithCreate:(TXGuardCreate)create destroy:(TXGuardDestroy)destroy owners:(TXGuardOwners)owners;
+@end
+@implementation TXAudioMuteGuard {
+    AudioObjectID _tap;
+    TXGuardCreate _create;
+    TXGuardDestroy _destroy;
+    TXGuardOwners _owners;
+}
+- (instancetype)init {
+    return [self initWithCreate:^OSStatus(CATapDescription *description,AudioObjectID *tap){return AudioHardwareCreateProcessTap(description,tap);}
+                       destroy:^OSStatus(AudioObjectID tap){return AudioHardwareDestroyProcessTap(tap);}
+                        owners:^NSArray<NSNumber*>*(NSError **error){return GuardOwnProcesses(error);}];
+}
+- (instancetype)initWithCreate:(TXGuardCreate)create destroy:(TXGuardDestroy)destroy owners:(TXGuardOwners)owners {
+    if((self=[super init])){_create=[create copy];_destroy=[destroy copy];_owners=[owners copy];}return self;
+}
+- (BOOL)active{return _tap!=kAudioObjectUnknown;}
+- (BOOL)begin:(NSError**)error {
+    NSAssert(!NSThread.isMainThread,@"Mute guard must run on the serial HAL worker");
+    if(error)*error=nil;if(self.active)return YES;
+    NSError *ownerError=nil;NSArray<NSNumber*> *owners=_owners(&ownerError);
+    if(!owners){if(error)*error=ownerError?:GuardError(@"Process ownership",kAudioHardwareBadObjectError);return NO;}
+    CATapDescription *description=[[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:owners];
+    // CATapMuted holds source silence without an IOProc or aggregate, independently of TXAudio.stop.
+    description.name=@"TX6Mac Transition Guard";description.privateTap=YES;description.muteBehavior=CATapMuted;
+    AudioObjectID tap=kAudioObjectUnknown;OSStatus status=_create(description,&tap);
+    if(status!=noErr||tap==kAudioObjectUnknown){if(error)*error=GuardError(@"Create mute guard",status?:kAudioHardwareBadObjectError);return NO;}
+    _tap=tap;return YES;
+}
+- (BOOL)end:(NSError**)error {
+    NSAssert(!NSThread.isMainThread,@"Mute guard must run on the serial HAL worker");
+    if(error)*error=nil;if(!self.active)return YES;
+    OSStatus status=_destroy(_tap);
+    if(status!=noErr){if(error)*error=GuardError(@"Destroy mute guard",status);return NO;}
+    _tap=kAudioObjectUnknown;return YES;
+}
+- (void)dealloc {
+    if(_tap){OSStatus status=_destroy(_tap);if(status!=noErr)fprintf(stderr,"Mute guard cleanup failed: %d\n",(int)status);}
+}
+@end
+
+static void GuardEvent(NSString *event,TXAudioMuteGuard *guard,NSError *error) {
+    struct timespec now;clock_gettime(CLOCK_MONOTONIC,&now);
+    NSMutableDictionary *entry=[@{@"event":event,@"monotonicSeconds":@(now.tv_sec+now.tv_nsec/1e9),@"active":@(guard.active)} mutableCopy];
+    if(error){entry[@"error"]=error.localizedDescription;entry[@"errorCode"]=@(error.code);}
+    NSData *data=[NSJSONSerialization dataWithJSONObject:entry options:NSJSONWritingSortedKeys error:nil];
+    fwrite(data.bytes,1,data.length,stdout);fputc('\n',stdout);fflush(stdout);
+}
+int TXHoldAudioMuteGuard(void) {
+    for(NSRunningApplication *app in [NSRunningApplication runningApplicationsWithBundleIdentifier:NSBundle.mainBundle.bundleIdentifier])if(app.processIdentifier!=getpid()){
+        GuardEvent(@"refused",nil,GuardError(@"Quit the mixer before the mute guard diagnostic",2));return 2;
+    }
+    __block int result=0;dispatch_semaphore_t finished=dispatch_semaphore_create(0);
+    dispatch_queue_t worker=dispatch_queue_create("local.tx6mac.mute-guard-diagnostic",DISPATCH_QUEUE_SERIAL);
+    dispatch_async(worker,^{@autoreleasepool{
+        TXAudioMuteGuard *guard=[TXAudioMuteGuard new];NSError *error=nil;
+        @try{
+            GuardEvent(@"waiting",guard,nil);[NSThread sleepForTimeInterval:3];GuardEvent(@"begin_requested",guard,nil);
+            if(![guard begin:&error]){GuardEvent(@"begin_failed",guard,error);result=3;}
+            else{GuardEvent(@"began",guard,nil);[NSThread sleepForTimeInterval:5];}
+        }@catch(NSException *exception){GuardEvent(@"exception",guard,GuardError(exception.reason?:exception.name,4));result=4;}
+        @finally{
+            if(guard.active){GuardEvent(@"end_requested",guard,nil);if([guard end:&error])GuardEvent(@"ended",guard,nil);else{GuardEvent(@"end_failed",guard,error);result=4;}}
+            GuardEvent(result?@"failed":@"completed",guard,nil);dispatch_semaphore_signal(finished);
+        }
+    }});
+    dispatch_semaphore_wait(finished,DISPATCH_TIME_FOREVER);return result;
 }
 
 @implementation TXAudio {
@@ -478,16 +579,21 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
 - (void)dealloc{[self stop];free(_state);}
 @end
 
-typedef struct {double rate;uint64_t frame;_Atomic(uint64_t) frames;_Atomic(int) fault;} TXUSBReferenceState;
+static float QuietUSBSource(uint64_t frame,double rate) {
+    if(!isfinite(rate)||rate<8000||frame>=rate*14)return 0;
+    double fade=rate*.01,envelope=fmax(0,fmin(1,fmin(frame/fade,(rate*14-1-frame)/fade)));
+    return .01584893f*envelope*sin(2*M_PI*440*frame/rate);
+}
+typedef struct {double rate;uint64_t frame;_Atomic(uint64_t) frames;_Atomic(int) fault;BOOL quiet;} TXUSBReferenceState;
 static OSStatus DirectReference(AudioObjectID device,const AudioTimeStamp *now,const AudioBufferList *input,const AudioTimeStamp *it,AudioBufferList *output,const AudioTimeStamp *ot,void *context) {
     TXUSBReferenceState *s=context;if(!output){atomic_store(&s->fault,1);return noErr;}
     for(UInt32 b=0;b<output->mNumberBuffers;b++)if(output->mBuffers[b].mData)memset(output->mBuffers[b].mData,0,output->mBuffers[b].mDataByteSize);
     float *left,*right;UInt32 ls,rs,lf,rf;
     if(!ChannelPointer(output,2,&left,&ls,&lf)||!ChannelPointer(output,3,&right,&rs,&rf)){atomic_store(&s->fault,2);return noErr;}
-    UInt32 frames=MIN(lf,rf);for(UInt32 f=0;f<frames;f++){float value=MeterReference(s->frame++,s->rate);left[f*ls]=value;right[f*rs]=value;}
+    UInt32 frames=MIN(lf,rf);for(UInt32 f=0;f<frames;f++){float value=s->quiet?QuietUSBSource(s->frame++,s->rate):MeterReference(s->frame++,s->rate);left[f*ls]=value;right[f*rs]=value;}
     atomic_fetch_add(&s->frames,frames);return noErr;
 }
-int TXCheckUSBMeterRoute(BOOL direct) {
+static int CheckUSBMeterRoute(BOOL direct,BOOL quiet) {
     for(NSRunningApplication *app in [NSRunningApplication runningApplicationsWithBundleIdentifier:NSBundle.mainBundle.bundleIdentifier])if(app.processIdentifier!=getpid()){fprintf(stderr,"Quit the mixer before the USB route diagnostic; its process taps can intercept the test signal.\n");return 2;}
     __block int result=0;
     dispatch_semaphore_t finished=dispatch_semaphore_create(0);
@@ -496,7 +602,7 @@ int TXCheckUSBMeterRoute(BOOL direct) {
         for(NSDictionary *d in TXAudio.outputs){NSString *name=[d[@"name"] uppercaseString];if(([name containsString:@"TX-6"]||[name containsString:@"TX6"])&&[d[@"transport"] unsignedIntValue]==kAudioDeviceTransportTypeUSB&&[d[@"channels"] unsignedIntValue]==12&&Channels([d[@"id"] unsignedIntValue],kAudioDevicePropertyScopeInput)==2)[matches addObject:d];}
         if(matches.count!=1||primary==[matches.firstObject[@"id"] unsignedIntValue]){fprintf(stderr,"Requires one USB 12 IN TX-6 and a separate default output.\n");result=2;return;}
         if(direct){
-            AudioDeviceID device=[matches.firstObject[@"id"] unsignedIntValue];TXUSBReferenceState *state=calloc(1,sizeof(*state));if(!state){result=3;return;}UInt32 bytes=sizeof(state->rate);
+            AudioDeviceID device=[matches.firstObject[@"id"] unsignedIntValue];TXUSBReferenceState *state=calloc(1,sizeof(*state));if(!state){result=3;return;}state->quiet=quiet;UInt32 bytes=sizeof(state->rate);
             AudioObjectPropertyAddress address=Addr(kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal);
             OSStatus status=AudioObjectGetPropertyData(device,&address,0,NULL,&bytes,&state->rate);
             if(status!=noErr||!isfinite(state->rate)||state->rate<8000){free(state);result=3;return;}
@@ -509,7 +615,7 @@ int TXCheckUSBMeterRoute(BOOL direct) {
             if(status!=noErr){free(state);result=3;return;}
             status=UseOnlyTapInputs(device,proc,2,2);BOOL started=NO;
             if(status==noErr){status=AudioDeviceStart(device,proc);started=status==noErr;}
-            if(started){printf("USB direct IOProc reference: track 2, -18 / -9 / -3 dBFS, four seconds each.\n");fflush(stdout);uint64_t last=0;for(int i=0;i<28;i++){[NSThread sleepForTimeInterval:.5];uint64_t frames=atomic_load(&state->frames);if(frames==last||atomic_load(&state->fault)){result=4;break;}last=frames;}}
+            if(started){printf("%s\n",quiet?"USB quiet source: track 2, at most -36 dBFS / 440 Hz, 14 seconds.":"USB direct IOProc reference: track 2, -18 / -9 / -3 dBFS, four seconds each.");fflush(stdout);uint64_t last=0;for(int i=0;i<28;i++){[NSThread sleepForTimeInterval:.5];uint64_t frames=atomic_load(&state->frames);if(frames==last||atomic_load(&state->fault)){result=4;break;}last=frames;}}
             if(!started||atomic_load(&state->fault)||!atomic_load(&state->frames)){fprintf(stderr,"USB direct diagnostic failed: %d/%d\n",status,atomic_load(&state->fault));result=4;}
             if(started&&AudioDeviceStop(device,proc)!=noErr)result=4;
             if(AudioDeviceDestroyIOProcID(device,proc)==noErr)free(state);else result=4;return;
@@ -536,7 +642,59 @@ int TXCheckUSBMeterRoute(BOOL direct) {
     }@finally{dispatch_semaphore_signal(finished);}}});dispatch_semaphore_wait(finished,DISPATCH_TIME_FOREVER);return result;
 }
 
+int TXCheckUSBMeterRoute(BOOL direct) {return CheckUSBMeterRoute(direct,NO);}
+int TXQuietUSBSource(void) {return CheckUSBMeterRoute(YES,YES);}
+
+static BOOL GuardSelfCheck(void) {
+    __block NSUInteger creates=0,destroys=0,ownersRead=0;__block OSStatus createStatus=noErr,destroyStatus=noErr;
+    __block BOOL ownerFailure=NO,validDescription=YES;__block AudioObjectID createdID=501,lastDestroyed=0;
+    TXGuardCreate create=^OSStatus(CATapDescription *description,AudioObjectID *tap){
+        creates++;*tap=createdID;
+        validDescription=validDescription&&description.privateTap&&description.muteBehavior==CATapMuted&&description.exclusive&&
+            [description.processes isEqualToArray:@[@101,@102]]&&!description.bundleIDs.count;
+        return createStatus;
+    };
+    TXGuardDestroy destroy=^OSStatus(AudioObjectID tap){destroys++;lastDestroyed=tap;return destroyStatus;};
+    TXGuardOwners owners=^NSArray<NSNumber*>*(NSError **error){ownersRead++;if(ownerFailure){if(error)*error=GuardError(@"Fake ownership",-703);return nil;}return @[@101,@102];};
+    NSError *error=nil;
+    @autoreleasepool{
+        TXAudioMuteGuard *guard=[[TXAudioMuteGuard alloc] initWithCreate:create destroy:destroy owners:owners];
+        if(guard.active||![guard end:&error]||destroys||error)return NO;
+        if(![guard begin:&error]||!guard.active||error||creates!=1||ownersRead!=1||!validDescription)return NO;
+        if(![guard begin:&error]||creates!=1||ownersRead!=1)return NO;
+        TXAudio *audio=[TXAudio new];atomic_store(&audio.state->transitionMuted,true);[audio stop];
+        if(!guard.active||destroys||!atomic_load(&audio.state->transitionMuted))return NO;
+        destroyStatus=-701;
+        if([guard end:&error]||!guard.active||error.code!=-701||destroys!=1||lastDestroyed!=501)return NO;
+        if(![guard begin:&error]||creates!=1||error)return NO;
+        destroyStatus=noErr;
+        if(![guard end:&error]||guard.active||error||destroys!=2||lastDestroyed!=501)return NO;
+        if(![guard end:&error]||destroys!=2)return NO;
+        createStatus=-702;createdID=999;
+        if([guard begin:&error]||guard.active||error.code!=-702||creates!=2||destroys!=2)return NO;
+        createStatus=noErr;createdID=kAudioObjectUnknown;
+        if([guard begin:&error]||guard.active||error.code!=kAudioHardwareBadObjectError||creates!=3||destroys!=2)return NO;
+        ownerFailure=YES;
+        if([guard begin:&error]||guard.active||error.code!=-703||creates!=3)return NO;
+        ownerFailure=NO;createdID=502;
+        if(![guard begin:&error]||!guard.active||error||creates!=4)return NO;
+        guard=nil;
+        if(destroys!=3||lastDestroyed!=502)return NO;
+    }
+    @autoreleasepool{
+        TXAudioMuteGuard *guard=[[TXAudioMuteGuard alloc] initWithCreate:create destroy:destroy owners:owners];
+        createStatus=-704;createdID=998;
+        if([guard begin:&error]||guard.active||error.code!=-704)return NO;
+        guard=nil;if(destroys!=3)return NO;
+    }
+    return validDescription;
+}
 BOOL TXRunSelfCheck(void) {
+    __block BOOL guardOK=NO;dispatch_semaphore_t guardFinished=dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{guardOK=GuardSelfCheck();dispatch_semaphore_signal(guardFinished);}});
+    dispatch_semaphore_wait(guardFinished,DISPATCH_TIME_FOREVER);
+    if(!guardOK){fprintf(stderr,"Mute guard lifecycle self-check failed.\n");return NO;}
+
     UInt32 po=0,no=0,mo=0,ic=0,oc=0;NSDictionary *counts=@{@"main":@{@"in":@1,@"out":@2},@"meter":@{@"in":@12,@"out":@12}};
     if(!OutputLayout(@[@"main",@"meter"],@"main",@"",@"meter",counts,&po,&no,&mo,&ic,&oc)||po!=0||mo!=2||ic!=13||oc!=14)return NO;
     if(!OutputLayout(@[@"meter",@"main"],@"main",@"",@"meter",counts,&po,&no,&mo,&ic,&oc)||po!=12||mo!=0||ic!=13||oc!=14)return NO;
@@ -702,6 +860,21 @@ BOOL TXRunSelfCheck(void) {
     for(int f=0;f<64;f++){source[2*f]=.1f;source[2*f+1]=-.05f;remainder[2*f]=.2f;remainder[2*f+1]=-.1f;}
     struct{UInt32 count;AudioBuffer buf[2];} ri={2,{{2,sizeof(source),source},{2,sizeof(remainder),remainder}}};
     struct{UInt32 count;AudioBuffer buf[3];} ro={3,{{2,64*2*sizeof(float),buses},{2,64*2*sizeof(float),buses+128},{12,64*12*sizeof(float),buses+256}}};
+    atomic_store(&routed.route[0],TXOutputBoth);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    uint64_t guardCallbacks=atomic_load(&routed.callbacks),guardFrames=atomic_load(&routed.frames);
+    atomic_store(&routed.transitionMuted,true);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    for(int i=0;i<16*64;i++)if(buses[i]!=0){fprintf(stderr,"Transition gate leaked an output sample.\n");return NO;}
+    for(int slot=0;slot<TX_SLOTS;slot++)if(atomic_load(&routed.peak[slot])!=0)return NO;
+    for(int slot=0;slot<6;slot++)if(atomic_load(&routed.usbPeak[slot])!=0||atomic_load(&routed.usbRMS[slot])!=0)return NO;
+    if(atomic_load(&routed.outputPeak)!=0||atomic_load(&routed.monitorPeak)!=0||atomic_load(&routed.callbacks)!=guardCallbacks+1||atomic_load(&routed.frames)!=guardFrames+64||atomic_load(&routed.layoutFault))return NO;
+    routed.monitorRight=16;
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(atomic_load(&routed.layoutFault)!=6||atomic_load(&routed.callbacks)!=guardCallbacks+1)return NO;
+    routed.monitorRight=3;atomic_store(&routed.layoutFault,0);atomic_store(&routed.transitionMuted,false);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(fabsf(buses[0]-.3f)>1e-6||fabsf(buses[128]-.1f)>1e-6||fabsf(buses[256]-.141253754f)>1e-6)return NO;
     UInt32 routeCases[]={TXOutputMain,TXOutputMonitor,TXOutputBoth,TXOutputOff,UINT32_MAX};
     float mainCases[]={.3f,.2f,.3f,.2f,.2f},monitorCases[]={0,.1f,.1f,0,0},mirrorCases[]={.141253754f,.141253754f,.141253754f,0,0};
     for(int i=0;i<5;i++){
@@ -800,5 +973,19 @@ BOOL TXRunSelfCheck(void) {
     TXUSBReferenceState direct={.rate=48000,.frame=1000};DirectReference(0,NULL,NULL,NULL,(AudioBufferList*)&mout,NULL,&direct);
     if(atomic_load(&direct.frames)!=64||atomic_load(&direct.fault))return NO;
     for(int f=0;f<64;f++){float expected=pow(10,-18.0/20)*sin(2*M_PI*440*(1000+f)/48000);if(fabsf(multi[f*14+2]-expected)>1e-6||multi[f*14+2]!=multi[f*14+3])return NO;for(int c=0;c<14;c++)if(c!=2&&c!=3&&multi[f*14+c]!=0)return NO;}
+    float quietPCM[12*64];
+    struct{UInt32 count;AudioBuffer buf[1];} quietOutput={1,{{12,sizeof(quietPCM),quietPCM}}};
+    TXUSBReferenceState quiet={.rate=48000,.quiet=YES};float quietPeak=0;
+    for(int block=0;block<48000*14/64+1;block++){
+        uint64_t first=quiet.frame;DirectReference(0,NULL,NULL,NULL,(AudioBufferList*)&quietOutput,NULL,&quiet);
+        for(int f=0;f<64;f++)for(int c=0;c<12;c++){
+            float value=quietPCM[f*12+c];
+            if(!isfinite(value)||fabsf(value)>.01584893f||(c!=2&&c!=3&&value!=0))return NO;
+            if((c==2||c==3)&&value!=QuietUSBSource(first+f,48000))return NO;
+            if(first+f>=48000*14&&value!=0)return NO;
+            quietPeak=fmaxf(quietPeak,fabsf(value));
+        }
+    }
+    if(quietPeak<.0158f||atomic_load(&quiet.fault)||atomic_load(&quiet.frames)!=quiet.frame||QuietUSBSource(0,48000)!=0||QuietUSBSource(48000*14-1,48000)!=0)return NO;
     return YES;
 }

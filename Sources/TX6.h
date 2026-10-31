@@ -16,7 +16,7 @@ typedef struct {
     _Atomic(float) monitorGain, monitorPeak;
     _Atomic(float) peak[TX_SLOTS], outputPeak;
     _Atomic(float) usbPeak[6], usbRMS[6];
-    _Atomic(bool) meterReference;
+    _Atomic(bool) meterReference, transitionMuted;
     uint64_t meterReferenceFrame;
     _Atomic(uint64_t) callbacks, frames, limitedFrames;
     _Atomic(int) layoutFault;
@@ -35,6 +35,13 @@ typedef struct {
     int tapSlots[TX_SLOTS];
     _Atomic(int) tapCount;
 } TXRenderState;
+
+// Own this guard independently of TXAudio; begin/end belong on the serial HAL worker.
+@interface TXAudioMuteGuard : NSObject
+@property(nonatomic,readonly) BOOL active;
+- (BOOL)begin:(NSError**)error;
+- (BOOL)end:(NSError**)error;
+@end
 
 @interface TXAudio : NSObject
 @property(nonatomic,readonly) TXRenderState *state;
@@ -68,6 +75,8 @@ typedef struct {
 
 BOOL TXRunSelfCheck(void);
 int TXCheckUSBMeterRoute(BOOL direct);
+int TXHoldAudioMuteGuard(void);
+int TXQuietUSBSource(void);
 int TXMeasureUSBReturn(BOOL requestMicrophone);
 BOOL TXRunMIDISelfCheck(void);
 void TXPrintBLEServices(BOOL requestAccess,BOOL observe,NSUInteger pingTarget);
