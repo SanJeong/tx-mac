@@ -38,4 +38,4 @@ SCENE saves assignments, levels, EQ, mute and routing, keeping master and FX2 un
 
 Chrome-wide volume and EQ work without an extension. For individual tabs, load `BrowserExtension` and enable tab mode in settings. Audible tabs appear automatically; tab volume and EQ require the extension button or `Command+Shift+6` once per tab.
 
-Noncommercial use, modification and redistribution are permitted under the [PolyForm Noncommercial License](LICENSE).
+Released under [CC0 1.0 Universal](LICENSE).

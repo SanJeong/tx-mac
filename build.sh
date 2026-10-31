@@ -13,7 +13,7 @@ if [[ -z "${SIGN_IDENTITY+x}" ]]; then
   ')"
 fi
 APP_VERSION="${APP_VERSION:-1.1.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-7}"
+BUILD_NUMBER="${BUILD_NUMBER:-8}"
 fail() { print -u2 -- "$*"; exit 1; }
 [[ "$DEST" == *.app ]] || fail 'Build destination must end in .app.'
 [[ ! -L "$DEST" ]] || fail 'Refusing to replace a symlink.'
@@ -47,13 +47,13 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>local.tx6mac.mixer</string>
 <key>CFBundleName</key><string>TX6Mac</string>
 <key>CFBundleDisplayName</key><string>TX6Mac</string>
-<key>NSHumanReadableCopyright</key><string>Copyright 2026 San Jeong. PolyForm Noncommercial License 1.0.0.</string>
+<key>NSHumanReadableCopyright</key><string>2026 San Jeong. CC0 1.0 Universal.</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleDevelopmentRegion</key><string>en</string>
 <key>CFBundleLocalizations</key><array><string>en</string><string>ko</string><string>ja</string></array>
 <key>CFBundleShortVersionString</key><string>1.1.0</string>
-<key>CFBundleVersion</key><string>7</string>
+<key>CFBundleVersion</key><string>8</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>LSMultipleInstancesProhibited</key><true/>
 <key>NSHighResolutionCapable</key><true/>
