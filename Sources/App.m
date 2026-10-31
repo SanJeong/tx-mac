@@ -1442,7 +1442,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (void)updateLevels {
     _levelSnapshot=TXReadLevels(_audio.state,_audioReady,_desiredRunning,_monitorUID.length>0,_monitoring);for(int i=0;i<6;i++)if([_assignments[i] hasPrefix:@"chrome-tab:"]){_levelSnapshot.unsupported[i]=YES;_levelSnapshot.available[i]=NO;}if(!_levelsController)return;NSMutableArray *names=[NSMutableArray array];for(int i=0;i<6;i++){NSString *name=_assignments[i].length?_channels[i].assignment.titleOfSelectedItem:nil;[names addObject:name.length?name:TXL(@"앱 미지정")];}[_levelsController updateSnapshot:_levelSnapshot channelNames:names];
 }
-- (void)showLevels:(id)sender {[_settingsPopover close];if(!_levelsController)_levelsController=[[TXLevelsController alloc] initWithRenderState:_audio.state];[self updateLevels];[_levelsController showWindow:sender];}
+- (void)showLevels:(id)sender {[_settingsPopover close];if(!_levelsController){_levelsController=[[TXLevelsController alloc] initWithRenderState:_audio.state];_levelsController.resetButton=Button(TXL(@"최고값 초기화"),NSZeroRect,nil,NULL);}[self updateLevels];[_levelsController showWindow:sender];}
 - (void)openPreferences:(id)sender {[self showWindow:nil];[self showSettings:_startButton];}
 - (void)showSettings:(NSButton*)sender {if(_settingsPopover.shown){[_settingsPopover close];return;}[NSApp activateIgnoringOtherApps:YES];[_window makeKeyAndOrderFront:nil];[_settingsPopover showRelativeToRect:sender.bounds ofView:sender preferredEdge:NSRectEdgeMinX];}
 - (void)popoverDidShow:(NSNotification*)notification {if(notification.object!=_settingsPopover)return;[_calibrationInput.window makeKeyWindow];[_calibrationInput.window makeFirstResponder:_calibrationInput];}

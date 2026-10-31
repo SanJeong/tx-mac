@@ -13,6 +13,7 @@ NSDictionary<NSString*,id> *TXLevelRowDisplay(TXLevelSnapshot snapshot,NSUIntege
 BOOL TXRunLevelsSelfCheck(void);
 
 @interface TXLevelsController:NSWindowController
+@property(nonatomic,strong) NSButton *resetButton;
 - (instancetype)initWithRenderState:(TXRenderState*)state;
 - (void)updateSnapshot:(TXLevelSnapshot)snapshot channelNames:(NSArray<NSString*>*)names;
 @end
