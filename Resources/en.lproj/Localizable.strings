@@ -183,3 +183,5 @@
 "선택 기능 · TX-6 USB 12 IN 채널 미터" = "Optional · TX-6 USB 12 IN channel meters";
 "TX-6 USB 12 IN 연결 대기 · Bluetooth만으로는 지원하지 않습니다." = "Waiting for TX-6 USB 12 IN · Bluetooth alone is not supported.";
 "%@ · 대기" = "%@ · waiting";
+"메인 출력 장치가 변경되어 오디오 연결을 중지했습니다." = "The main output device changed. Audio has been stopped.";
+"선택한 USB 미터 장치가 변경되어 연결하지 않았습니다." = "The selected USB meter device changed and was not connected.";

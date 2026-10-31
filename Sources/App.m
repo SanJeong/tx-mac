@@ -338,18 +338,27 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 }
 @end
 
+@interface TXAudio (TXOutputIdentity)
+- (NSString*)outputUIDForDevice:(AudioDeviceID)device expectedUID:(NSString*)expectedUID;
+@end
+@implementation TXAudio (TXOutputIdentity)
+- (NSString*)outputUIDForDevice:(AudioDeviceID)device expectedUID:(NSString*)expectedUID {return [TXAudio uid:device];}
+@end
+
 // The built-in check uses this backend without opening any hardware or permission prompt.
 @interface TXHALCheckAudio:TXAudio
 @property(atomic) NSUInteger starts,stops,blockStart;
 @property(atomic) BOOL usedMain,failMeters,failMonitor;
 @property(nonatomic,strong) dispatch_semaphore_t firstStartGate;
+@property(atomic,copy) NSDictionary<NSNumber*,NSString*> *liveUIDs,*UIDsAfterFailedStart;
 @end
 @implementation TXHALCheckAudio
+- (NSString*)outputUIDForDevice:(AudioDeviceID)device expectedUID:(NSString*)expectedUID {return self.liveUIDs[@(device)]?:expectedUID;}
 - (BOOL)startOnDevice:(AudioDeviceID)device groups:(NSArray*)groups {
     self.usedMain=self.usedMain||NSThread.isMainThread;self.starts++;
     if(self.starts==1||self.starts==self.blockStart)dispatch_semaphore_wait(self.firstStartGate,DISPATCH_TIME_FOREVER);
     if(self.failMonitor&&self.monitorOutputDevice){self.lastError=@"Simulated monitor failure";return NO;}
-    if(self.failMeters&&self.meterOutputDevice){self.lastError=@"Simulated USB meter failure";return NO;}self.lastError=@"";return YES;
+    if(self.failMeters&&self.meterOutputDevice){self.lastError=@"Simulated USB meter failure";if(self.UIDsAfterFailedStart)self.liveUIDs=self.UIDsAfterFailedStart;return NO;}self.lastError=@"";return YES;
 }
 - (BOOL)metering {return self.meterOutputDevice!=0&&!self.failMeters;}
 - (BOOL)monitoring {return self.monitorOutputDevice!=0&&!self.failMonitor;}
@@ -545,10 +554,10 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (void)refreshDeviceMenus {
     NSString *outSig=[NSString stringWithFormat:@"%@|%@|%@|%d",_outputs,[_outputUID stringByAppendingFormat:@"|%@",_monitorUID?:@""],_halSnapshot[@"defaultUID"],_followDefaultOutput];BOOL outputChanged=![_outputMenuSignature isEqual:outSig];_outputMenuSignature=outSig;
     NSMutableArray *processMenu=[NSMutableArray array];for(NSDictionary *p in _processes)[processMenu addObject:@[p[@"key"],p[@"name"]]];NSString *processSig=[NSString stringWithFormat:@"%@|%@",processMenu,_assignments];BOOL processesChanged=![_processMenuSignature isEqual:processSig];_processMenuSignature=processSig;
-    if(outputChanged){[_outputMenu removeAllItems];[_outputMenu addItemWithTitle:[self systemOutputTitle]];_outputMenu.lastItem.representedObject=@"";if(_followDefaultOutput)[_outputMenu selectItem:_outputMenu.lastItem];[_outputMenu.menu addItem:NSMenuItem.separatorItem];for(NSDictionary *d in _outputs){[_outputMenu addItemWithTitle:[NSString stringWithFormat:@"%@  ·  %@ ch",d[@"name"],d[@"channels"]]];_outputMenu.lastItem.representedObject=d[@"uid"];if(!_followDefaultOutput&&[d[@"uid"] isEqual:_outputUID])[_outputMenu selectItem:_outputMenu.lastItem];}
+    if(outputChanged){[_outputMenu removeAllItems];NSMenuItem *system=[[NSMenuItem alloc] initWithTitle:[self systemOutputTitle] action:nil keyEquivalent:@""];system.representedObject=@"";[_outputMenu.menu addItem:system];if(_followDefaultOutput)[_outputMenu selectItem:system];[_outputMenu.menu addItem:NSMenuItem.separatorItem];for(NSDictionary *d in _outputs){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%@  ·  %@ ch",d[@"name"],d[@"channels"]] action:nil keyEquivalent:@""];item.representedObject=d[@"uid"];[_outputMenu.menu addItem:item];if(!_followDefaultOutput&&[d[@"uid"] isEqual:_outputUID])[_outputMenu selectItem:item];}
     BOOL found=NO;for(NSDictionary *d in _outputs)if([d[@"uid"] isEqual:_outputUID])found=YES;
-    if(!found&&!_followDefaultOutput){[_outputMenu addItemWithTitle:TXL(@"선택한 출력 장치가 연결되지 않음")];_outputMenu.lastItem.representedObject=_outputUID;[_outputMenu selectItem:_outputMenu.lastItem];}}
-    if(outputChanged){[_monitorMenu removeAllItems];[_monitorMenu addItemWithTitle:TXL(@"끔")];_monitorMenu.lastItem.representedObject=@"";BOOL found=!_monitorUID.length;for(NSDictionary *device in _outputs){[_monitorMenu addItemWithTitle:device[@"name"]];_monitorMenu.lastItem.representedObject=device[@"uid"];if([device[@"uid"] isEqual:_monitorUID]){_monitorName=device[@"name"];[_monitorMenu selectItem:_monitorMenu.lastItem];found=YES;}}if(!found){[_monitorMenu addItemWithTitle:[NSString stringWithFormat:TXL(@"%@ (연결 안 됨)"),_monitorName.length?_monitorName:_monitorUID]];_monitorMenu.lastItem.representedObject=_monitorUID;[_monitorMenu selectItem:_monitorMenu.lastItem];}}
+    if(!found&&!_followDefaultOutput){NSMenuItem *offline=[[NSMenuItem alloc] initWithTitle:TXL(@"선택한 출력 장치가 연결되지 않음") action:nil keyEquivalent:@""];offline.representedObject=_outputUID;[_outputMenu.menu addItem:offline];[_outputMenu selectItem:offline];}}
+    if(outputChanged){[_monitorMenu removeAllItems];NSMenuItem *off=[[NSMenuItem alloc] initWithTitle:TXL(@"끔") action:nil keyEquivalent:@""];off.representedObject=@"";[_monitorMenu.menu addItem:off];BOOL found=!_monitorUID.length;for(NSDictionary *device in _outputs){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:device[@"name"] action:nil keyEquivalent:@""];item.representedObject=device[@"uid"];[_monitorMenu.menu addItem:item];if([device[@"uid"] isEqual:_monitorUID]){_monitorName=device[@"name"];[_monitorMenu selectItem:item];found=YES;}}if(!found){NSMenuItem *offline=[[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:TXL(@"%@ (연결 안 됨)"),_monitorName.length?_monitorName:_monitorUID] action:nil keyEquivalent:@""];offline.representedObject=_monitorUID;[_monitorMenu.menu addItem:offline];[_monitorMenu selectItem:offline];}}
     _monitorMenu.toolTip=_monitorMenu.titleOfSelectedItem;_outputMenu.toolTip=_outputMenu.titleOfSelectedItem;
     if(processesChanged)for(int i=0;i<6;i++){
         TXChannel *c=_channels[i];[c.assignment removeAllItems];[c.assignment addItemWithTitle:_autoAssign?TXL(@"재생 앱 대기…"):TXL(@"앱 지정…")];c.assignment.lastItem.representedObject=@"";BOOL present=!_assignments[i].length;
@@ -671,8 +680,20 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
         }else if([request[@"kind"] isEqual:@"start"]){
             AudioDeviceID wantedMeter=[request[@"meterDevice"] unsignedIntValue],wantedMonitor=[request[@"monitorDevice"] unsignedIntValue];
             NSArray *choices=@[@[@(wantedMonitor),@(wantedMeter)],@[@(wantedMonitor),@0],@[@0,@(wantedMeter)],@[@0,@0]];NSMutableSet *attempted=[NSMutableSet set];
-            for(NSArray *choice in choices){NSString *key=choice.description;if([attempted containsObject:key])continue;[attempted addObject:key];backend.monitorOutputDevice=[choice[0] unsignedIntValue];backend.meterOutputDevice=[choice[1] unsignedIntValue];ok=[backend startOnDevice:[request[@"device"] unsignedIntValue] groups:request[@"groups"]];if(ok)break;if(backend.monitorOutputDevice)monitorError=backend.lastError?:@"";if(backend.meterOutputDevice)meterError=backend.lastError?:@"";}
-            error=backend.lastError?:@"";metering=ok&&backend.metering;monitoring=ok&&backend.monitoring;if(metering)meterError=@"";if(monitoring)monitorError=@"";
+            BOOL monitorIdentityLost=NO,meterIdentityLost=NO;
+            for(NSArray *choice in choices){
+                AudioDeviceID main=[request[@"device"] unsignedIntValue],monitor=[choice[0] unsignedIntValue],meter=[choice[1] unsignedIntValue];
+                NSString *mainUID=request[@"mainUID"];
+                if(!mainUID.length||![[backend outputUIDForDevice:main expectedUID:mainUID] isEqual:mainUID]){[backend stop];backend.monitorOutputDevice=0;backend.meterOutputDevice=0;error=TXL(@"메인 출력 장치가 변경되어 오디오 연결을 중지했습니다.");break;}
+                NSString *monitorUID=request[@"monitorUID"],*meterUID=request[@"meterUID"];
+                if(monitor&&(!monitorUID.length||![[backend outputUIDForDevice:monitor expectedUID:monitorUID] isEqual:monitorUID])){monitorIdentityLost=YES;monitorError=TXL(@"선택한 미리 듣기 장치가 연결되지 않음");}
+                if(meter&&(!meterUID.length||![[backend outputUIDForDevice:meter expectedUID:meterUID] isEqual:meterUID])){meterIdentityLost=YES;meterError=TXL(@"선택한 USB 미터 장치가 변경되어 연결하지 않았습니다.");}
+                if(monitorIdentityLost)monitor=0;if(meterIdentityLost)meter=0;
+                NSString *key=[NSString stringWithFormat:@"%u:%u",monitor,meter];if([attempted containsObject:key])continue;[attempted addObject:key];
+                backend.monitorOutputDevice=monitor;backend.meterOutputDevice=meter;ok=[backend startOnDevice:main groups:request[@"groups"]];if(ok)break;
+                if(monitor)monitorError=backend.lastError?:@"";if(meter)meterError=backend.lastError?:@"";
+            }
+            if(!error.length)error=backend.lastError?:@"";metering=ok&&backend.metering;monitoring=ok&&backend.monitoring;if(metering)meterError=@"";if(monitoring)monitorError=@"";
         }else [backend stop];
         dispatch_async(dispatch_get_main_queue(),^{
             TXApp *app=weakSelf;if(!app)return;
@@ -692,6 +713,9 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     }});
 }
 + (BOOL)halSelfCheck {
+    TXApp *menus=[TXHALCheckApp new];menus->_audio=[TXAudio new];menus->_assignments=[@[@"local.tx6mac.system-sounds",@"",@"",@"",@"",@""] mutableCopy];menus->_processes=@[];menus->_outputs=@[@{@"id":@101,@"uid":@"studioA",@"name":@"Studio Display",@"channels":@2},@{@"id":@102,@"uid":@"studioB",@"name":@"Studio Display",@"channels":@2}];menus->_outputMenu=[[TXPopup alloc] initWithFrame:NSZeroRect pullsDown:NO];menus->_monitorMenu=[[TXPopup alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    BOOL duplicateMenusOK=YES;for(NSString *uid in @[@"studioA",@"studioB"]){menus->_outputUID=uid;menus->_monitorUID=uid;menus->_outputMenuSignature=nil;[menus refreshDeviceMenus];if(menus->_outputMenu.numberOfItems!=4||menus->_monitorMenu.numberOfItems!=3||![menus->_outputMenu.selectedItem.representedObject isEqual:uid]||![menus->_monitorMenu.selectedItem.representedObject isEqual:uid]||![menus->_outputUID isEqual:uid]||![menus->_monitorUID isEqual:uid])duplicateMenusOK=NO;}
+    if(!duplicateMenusOK)fprintf(stderr,"Duplicate-name device UID menu regression: FAIL\n");
     TXApp *app=[TXHALCheckApp new];TXHALCheckAudio *backend=[TXHALCheckAudio new];backend.firstStartGate=dispatch_semaphore_create(0);
     app->_audio=backend;app->_halQueue=dispatch_queue_create("local.tx6mac.hal-check",DISPATCH_QUEUE_SERIAL);app->_halSnapshotReady=YES;
     app->_assignments=[@[@"local.tx6mac.system-sounds",@"",@"",@"",@"",@""] mutableCopy];app->_processes=@[];app->_audioError=@"";
@@ -775,7 +799,19 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     if(backend.starts!=before||app->_halGeneration!=generation||![unchanged isEqual:[app currentSignature]]||atomic_load(&backend.state->route[0])!=TXOutputMonitor||atomic_load(&backend.state->monitorGain)!=.25)return NO;
     app->_monitorUID=usb[@"uid"];if([app usbMeterDevice])return NO;
     app->_desiredRunning=NO;[app stopAudio];if(!until(^BOOL{return !app->_halBusy;})||app->_monitoring||backend.usedMain)return NO;
-    return YES;
+    app->_desiredRunning=YES;app->_usbMeters=NO;app->_monitorUID=@"fixtureA";backend.liveUIDs=@{@1:@"recycled-speaker"};before=backend.starts;[app rebuildAudio];
+    BOOL monitorIdentityOK=until(^BOOL{return !app->_halBusy&&!app->_pendingHALRequest;})&&app->_audioReady&&!app->_monitoring&&backend.monitorOutputDevice==0&&app->_monitorError.length&&backend.starts==before+1&&atomic_load(&backend.state->route[0])==TXOutputMonitor;
+    if(!monitorIdentityOK)fprintf(stderr,"Recycled monitor device ID regression: FAIL\n");
+    backend.liveUIDs=@{@42:@"recycled-meter"};app->_usbMeters=YES;app->_monitorUID=@"";before=backend.starts;[app rebuildAudio];BOOL meterIdentityOK=until(^BOOL{return !app->_halBusy&&!app->_pendingHALRequest;})&&app->_audioReady&&!app->_usbMetering&&backend.meterOutputDevice==0&&app->_usbMeterError.length&&backend.starts==before+1;
+    if(!meterIdentityOK)fprintf(stderr,"Recycled meter device ID regression: FAIL\n");
+    backend.liveUIDs=nil;backend.UIDsAfterFailedStart=@{@1:@"recycled-monitor-during-fallback"};backend.failMeters=YES;app->_monitorUID=@"fixtureA";before=backend.starts;[app rebuildAudio];BOOL retryIdentityOK=until(^BOOL{return !app->_halBusy&&!app->_pendingHALRequest;})&&app->_audioReady&&!app->_monitoring&&!app->_usbMetering&&backend.monitorOutputDevice==0&&app->_monitorError.length&&backend.starts==before+2;
+    if(!retryIdentityOK)fprintf(stderr,"Fallback monitor identity recheck regression: FAIL\n");backend.UIDsAfterFailedStart=nil;backend.failMeters=NO;app->_usbMeters=NO;app->_monitorUID=@"";
+    backend.liveUIDs=nil;backend.UIDsAfterFailedStart=@{@2:@"recycled-main-during-fallback"};backend.failMeters=YES;app->_usbMeters=YES;before=backend.starts;NSUInteger retryStopped=backend.stops;[app rebuildAudio];BOOL mainRetryIdentityOK=until(^BOOL{return !app->_halBusy&&!app->_pendingHALRequest;})&&!app->_audioReady&&backend.starts==before+1&&backend.stops==retryStopped+1&&app->_audioError.length;
+    if(!mainRetryIdentityOK)fprintf(stderr,"Fallback main identity recheck regression: FAIL\n");backend.UIDsAfterFailedStart=nil;backend.failMeters=NO;app->_usbMeters=NO;
+    backend.liveUIDs=@{@2:@"recycled-main"};app->_retryExhausted=NO;before=backend.starts;NSUInteger stopped=backend.stops;[app rebuildAudio];BOOL mainIdentityOK=until(^BOOL{return !app->_halBusy&&!app->_pendingHALRequest;})&&!app->_audioReady&&backend.starts==before&&backend.stops==stopped+1&&app->_audioError.length;
+    if(!mainIdentityOK)fprintf(stderr,"Recycled main device ID regression: FAIL\n");
+    app->_desiredRunning=NO;[app stopAudio];if(!until(^BOOL{return !app->_halBusy;}))return NO;
+    return duplicateMenusOK&&monitorIdentityOK&&meterIdentityOK&&retryIdentityOK&&mainRetryIdentityOK&&mainIdentityOK;
 }
 - (void)stopAudio {
     _audioReady=NO;_usbMetering=NO;_monitoring=NO;_isBuilding=NO;_halStopping=YES;_pendingAudioSignature=nil;_halGeneration++;
@@ -790,7 +826,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     _audioReady=NO;_usbMetering=NO;_monitoring=NO;_usbMeterError=@"";_monitorError=@"";_isBuilding=YES;_halStopping=NO;_pendingAudioSignature=signature;_halGeneration++;
     NSMutableArray *groups=[NSMutableArray array];for(NSArray *group in [self currentGroups])[groups addObject:[group copy]];
     NSDictionary *monitor=[self selectedMonitor];NSString *monitorError=@"";if(_monitorUID.length&&!monitor)monitorError=TXL(@"선택한 미리 듣기 장치가 연결되지 않음");if(monitor&&[monitor[@"uid"] isEqual:device[@"uid"]]){monitor=nil;monitorError=TXL(@"서로 다른 스테레오 모니터 장치가 필요합니다");}
-    _pendingHALRequest=@{@"monitorDevice":monitor[@"id"]?:@0,@"monitorError":monitorError,@"kind":@"start",@"generation":@(_halGeneration),@"device":device[@"id"],@"meterDevice":[self usbMeterDevice][@"id"]?:@0,@"groups":[groups copy],@"signature":signature};
+    _pendingHALRequest=@{@"mainUID":device[@"uid"]?:@"",@"monitorUID":monitor[@"uid"]?:@"",@"meterUID":[self usbMeterDevice][@"uid"]?:@"",@"monitorDevice":monitor[@"id"]?:@0,@"monitorError":monitorError,@"kind":@"start",@"generation":@(_halGeneration),@"device":device[@"id"],@"meterDevice":[self usbMeterDevice][@"id"]?:@0,@"groups":[groups copy],@"signature":signature};
     _canvas.message=TXL(@"오디오 연결 중 · macOS 응답을 기다립니다.");
     [self sendBrowserControls];[self updateStatus];[self writeStatusNow];[self processHALWork];
 }
