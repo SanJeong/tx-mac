@@ -610,8 +610,61 @@ int TXProbeAudioMuteGuard(void) {
     dispatch_semaphore_wait(finished,DISPATCH_TIME_FOREVER);dispatch_source_cancel(watchdog);return result;
 }
 
+typedef NSString* (^TXTapBundleReader)(AudioObjectID);
+typedef OSStatus (^TXTapFormatReader)(AudioObjectID,AudioStreamBasicDescription*);
+static NSArray *CopySlotBundleIDs(id value) {
+    if(!value)return nil;if(![value isKindOfClass:NSArray.class]||[value count]!=6)return @[];
+    NSMutableArray *rows=[NSMutableArray array];
+    for(id row in value){if(![row isKindOfClass:NSArray.class])return @[];NSMutableArray *members=[NSMutableArray array];
+        for(id member in row){if(![member isKindOfClass:NSString.class])return @[];[members addObject:[member copy]];}[rows addObject:[members copy]];}
+    return [rows copy];
+}
+static NSError *TapPlanError(NSString *stage,OSStatus status) {return [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:@{NSLocalizedDescriptionKey:stage}];}
+static NSArray<NSDictionary*> *PlanProcessTaps(NSArray *groups,NSArray *metadata,NSArray *ownProcesses,NSString *ownBundle,TXTapBundleReader bundleForProcess,NSError **error) {
+    if(error)*error=nil;
+    if(groups.count!=6||(metadata&&metadata.count!=6)){if(error)*error=TapPlanError(TXL(@"6개 트랙 그룹이 필요합니다"),-4);return nil;}
+    if(!ownBundle.length){if(error)*error=TapPlanError(TXL(@"앱 식별자가 없어 피드백 방지를 보장할 수 없습니다"),-7);return nil;}
+    NSMutableArray *excluded=[ownProcesses mutableCopy],*slotBundles=[NSMutableArray array];NSMutableSet *assignedBundles=[NSMutableSet set];
+    NSMutableCharacterSet *invalid=[NSCharacterSet.whitespaceAndNewlineCharacterSet mutableCopy];[invalid formUnionWithCharacterSet:NSCharacterSet.controlCharacterSet];[invalid addCharactersInString:@":/"];
+    for(int slot=0;slot<6;slot++){
+        NSMutableOrderedSet *bundles=[NSMutableOrderedSet orderedSet];
+        for(NSNumber *process in groups[slot]){NSString *bundle=bundleForProcess(process.unsignedIntValue);if(bundle.length)[bundles addObject:bundle];}
+        if(metadata){id row=metadata[slot];if(![row isKindOfClass:NSArray.class]){if(error)*error=TapPlanError(TXL(@"프로그램 중복 매핑"),-5);return nil;}
+            for(id bundle in row){if(![bundle isKindOfClass:NSString.class]||![bundle length]||[bundle isEqual:@"local.tx6mac.system-sounds"]||[bundle isEqual:ownBundle]||[bundle rangeOfCharacterFromSet:invalid].location!=NSNotFound){if(error)*error=TapPlanError(TXL(@"프로그램 중복 매핑"),-5);return nil;}[bundles addObject:bundle];}
+            for(NSString *bundle in bundles){if([bundle isEqual:ownBundle]||[assignedBundles containsObject:bundle]){if(error)*error=TapPlanError(TXL(@"프로그램 중복 매핑"),-5);return nil;}[assignedBundles addObject:bundle];}
+        }
+        [slotBundles addObject:bundles.array];[excluded addObjectsFromArray:groups[slot]];
+    }
+    NSMutableOrderedSet *excludedBundles=[NSMutableOrderedSet orderedSet];
+    for(NSNumber *process in excluded){NSString *bundle=bundleForProcess(process.unsignedIntValue);if(bundle.length)[excludedBundles addObject:bundle];}
+    if(metadata)for(NSArray *row in slotBundles)[excludedBundles addObjectsFromArray:row];[excludedBundles addObject:ownBundle];
+    NSMutableArray *plan=[NSMutableArray array];
+    for(int slot=0;slot<TX_SLOTS;slot++){
+        NSArray *ids=slot<6?groups[slot]:excluded,*bundles=slot<6?slotBundles[slot]:excludedBundles.array;
+        if(slot<6&&!ids.count&&(!metadata||!bundles.count))continue;
+        CATapDescription *description=slot==6?[[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:ids]:[[CATapDescription alloc] initStereoMixdownOfProcesses:ids];
+        description.name=[NSString stringWithFormat:TXL(@"TX6Mac 채널 %d"),slot+1];description.privateTap=YES;description.muteBehavior=CATapMutedWhenTapped;
+        if(@available(macOS 26.0,*)){description.bundleIDs=bundles;description.processRestoreEnabled=YES;}
+        else if(metadata){if(error)*error=TapPlanError(TXL(@"지원하지 않는 프로그램 오디오 탭 형식"),-8);return nil;}
+        [plan addObject:@{@"slot":@(slot),@"description":description}];
+    }
+    return plan;
+}
+static NSArray<NSDictionary*> *CreateProcessTapSet(NSArray<NSDictionary*> *plan,NSMutableArray<NSNumber*> *owned,TXGuardCreate create,TXTapFormatReader readFormat,NSError **error) {
+    if(error)*error=nil;NSMutableArray *created=[NSMutableArray array];
+    for(NSDictionary *entry in plan){CATapDescription *description=entry[@"description"];AudioObjectID tap=0;OSStatus status=create(description,&tap);
+        if(status!=noErr||!tap){if(error)*error=TapPlanError(TXL(@"프로그램 오디오 탭 생성"),status?:kAudioHardwareBadObjectError);return nil;}
+        [owned addObject:@(tap)];AudioStreamBasicDescription format={0};status=readFormat(tap,&format);
+        if(status!=noErr||format.mChannelsPerFrame!=2||format.mFormatID!=kAudioFormatLinearPCM||!(format.mFormatFlags&kAudioFormatFlagIsFloat)||format.mBitsPerChannel!=32){if(error)*error=TapPlanError(TXL(@"지원하지 않는 프로그램 오디오 탭 형식"),status?:-8);return nil;}
+        [created addObject:@{@"slot":entry[@"slot"],@"description":description,@"tap":@(tap),@"subtap":@{@kAudioSubTapUIDKey:description.UUID.UUIDString,@kAudioSubTapDriftCompensationKey:@YES}}];
+    }
+    return created;
+}
+static void DestroyProcessTapSet(NSMutableArray<NSNumber*> *owned,TXGuardDestroy destroy) {for(NSNumber *tap in owned)destroy(tap.unsignedIntValue);[owned removeAllObjects];}
+
 @implementation TXAudio {
     TXRenderState *_state;
+    NSArray<NSArray<NSString*>*> *_slotBundleIDs;
     NSMutableArray<NSNumber*> *_taps;
     AudioDeviceID _aggregate,_device;
     AudioDeviceIOProcID _proc;
@@ -621,6 +674,8 @@ int TXProbeAudioMuteGuard(void) {
 }
 - (instancetype)init {if((self=[super init])){_state=calloc(1,sizeof(*_state));_taps=[NSMutableArray array];atomic_store(&_state->master,1);atomic_store(&_state->monitorGain,1);for(int i=0;i<TX_SLOTS;i++)atomic_store(&_state->gain[i],1);}return self;}
 - (TXRenderState*)state{return _state;}
+- (NSArray<NSArray<NSString*>*>*)slotBundleIDs{return _slotBundleIDs;}
+- (void)setSlotBundleIDs:(NSArray<NSArray<NSString*>*>*)value {_slotBundleIDs=CopySlotBundleIDs(value);}
 - (BOOL)running{return _running;}
 - (AudioDeviceID)device{return _device;}
 - (BOOL)metering{return _running&&_state->meterEnabled;}
@@ -690,29 +745,16 @@ int TXProbeAudioMuteGuard(void) {
     if(!PreferredStereo(device,Channels(device,kAudioDevicePropertyScopeOutput),&_state->outputLeft,&_state->outputRight))return [self fail:TXL(@"스테레오 출력 장치가 필요합니다") status:-23];
     if(monitor&&!PreferredStereo(monitor,Channels(monitor,kAudioDevicePropertyScopeOutput),&_state->monitorLeft,&_state->monitorRight))return [self fail:TXL(@"모니터 스테레오 채널 확인") status:-27];
     UInt32 size=0;
-    NSMutableArray *excluded=[NSMutableArray array];
-    // Exclude this process from the global tap to prevent feedback.
-    for(NSNumber *n in ReadIDs(kAudioObjectSystemObject,kAudioHardwarePropertyProcessObjectList,kAudioObjectPropertyScopeGlobal))if((pid_t)ReadUInt(n.unsignedIntValue,kAudioProcessPropertyPID)==getpid())[excluded addObject:n];
-    for(NSArray *group in groups)[excluded addObjectsFromArray:group];
+    NSMutableArray *ownProcesses=[NSMutableArray array];
+    for(NSNumber *n in ReadIDs(kAudioObjectSystemObject,kAudioHardwarePropertyProcessObjectList,kAudioObjectPropertyScopeGlobal))if((pid_t)ReadUInt(n.unsignedIntValue,kAudioProcessPropertyPID)==getpid())[ownProcesses addObject:n];
+    NSError *tapError=nil;NSArray *plan=PlanProcessTaps(groups,_slotBundleIDs,ownProcesses,NSBundle.mainBundle.bundleIdentifier,^NSString*(AudioObjectID process){return ReadString(process,kAudioProcessPropertyBundleID);},&tapError);
+    if(!plan)return [self fail:tapError.localizedDescription status:(OSStatus)tapError.code];
+    NSArray *created=CreateProcessTapSet(plan,_taps,^OSStatus(CATapDescription *description,AudioObjectID *tap){return AudioHardwareCreateProcessTap(description,tap);},^OSStatus(AudioObjectID tap,AudioStreamBasicDescription *format){
+        UInt32 bytes=sizeof(*format);AudioObjectPropertyAddress address=Addr(kAudioTapPropertyFormat,kAudioObjectPropertyScopeGlobal);return AudioObjectGetPropertyData(tap,&address,0,NULL,&bytes,format);
+    },&tapError);
+    if(!created)return [self fail:tapError.localizedDescription status:(OSStatus)tapError.code];
     NSMutableArray *tapList=[NSMutableArray array];
-    for(int slot=0;slot<TX_SLOTS;slot++){
-        NSArray *ids=slot<6?groups[slot]:excluded;if(slot<6&&!ids.count)continue;
-        CATapDescription *desc=slot==6?[[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:ids]:[[CATapDescription alloc] initStereoMixdownOfProcesses:ids];
-        desc.name=[NSString stringWithFormat:TXL(@"TX6Mac 채널 %d"),slot+1];desc.privateTap=YES;desc.muteBehavior=CATapMutedWhenTapped;
-        if(@available(macOS 26.0,*)){
-            NSMutableOrderedSet<NSString*> *bundles=[NSMutableOrderedSet orderedSet];
-            for(NSNumber *process in ids){NSString *bundle=ReadString(process.unsignedIntValue,kAudioProcessPropertyBundleID);if(bundle.length)[bundles addObject:bundle];}
-            if(slot==6){NSString *ownBundle=NSBundle.mainBundle.bundleIdentifier;if(ownBundle.length)[bundles addObject:ownBundle];else return [self fail:TXL(@"앱 식별자가 없어 피드백 방지를 보장할 수 없습니다") status:-7];}
-            desc.bundleIDs=bundles.array;desc.processRestoreEnabled=YES;
-        }
-        AudioObjectID tap=0;OSStatus status=AudioHardwareCreateProcessTap(desc,&tap);if(status!=noErr)return [self fail:TXL(@"프로그램 오디오 탭 생성") status:status];
-        [_taps addObject:@(tap)];_state->tapSlots[_state->tapCount++]=slot;
-        if(slot==6){_globalDescription=desc;_globalTap=tap;}
-        AudioStreamBasicDescription tapFormat={0};UInt32 tapFormatSize=sizeof(tapFormat);AudioObjectPropertyAddress tapFormatAddr=Addr(kAudioTapPropertyFormat,kAudioObjectPropertyScopeGlobal);
-        status=AudioObjectGetPropertyData(tap,&tapFormatAddr,0,NULL,&tapFormatSize,&tapFormat);
-        if(status!=noErr||tapFormat.mChannelsPerFrame!=2||tapFormat.mFormatID!=kAudioFormatLinearPCM||!(tapFormat.mFormatFlags&kAudioFormatFlagIsFloat)||tapFormat.mBitsPerChannel!=32)return [self fail:TXL(@"지원하지 않는 프로그램 오디오 탭 형식") status:status?:-8];
-        [tapList addObject:@{@kAudioSubTapUIDKey:desc.UUID.UUIDString,@kAudioSubTapDriftCompensationKey:@YES}];
-    }
+    for(NSDictionary *entry in created){int slot=[entry[@"slot"] intValue];_state->tapSlots[_state->tapCount++]=slot;[tapList addObject:entry[@"subtap"]];if(slot==6){_globalDescription=entry[@"description"];_globalTap=[entry[@"tap"] unsignedIntValue];}}
     NSMutableArray *subdevices=[NSMutableArray arrayWithObject:@{@kAudioSubDeviceUIDKey:uid}];
     if(monitor)[subdevices addObject:@{@kAudioSubDeviceUIDKey:monitorUID,@kAudioSubDeviceDriftCompensationKey:@YES}];
     if(meter)[subdevices addObject:@{@kAudioSubDeviceUIDKey:meterUID,@kAudioSubDeviceDriftCompensationKey:@YES}];
@@ -779,7 +821,7 @@ int TXProbeAudioMuteGuard(void) {
     NSAssert(!NSThread.isMainThread||(!_aggregate&&!_taps.count),@"HAL shutdown must not block the main thread");
     if(_aggregate&&_proc){AudioDeviceStop(_aggregate,_proc);AudioDeviceDestroyIOProcID(_aggregate,_proc);}_proc=NULL;
     if(_aggregate)AudioHardwareDestroyAggregateDevice(_aggregate);_aggregate=0;
-    for(NSNumber *n in _taps)AudioHardwareDestroyProcessTap(n.unsignedIntValue);[_taps removeAllObjects];_globalDescription=nil;_globalTap=0;_running=NO;
+    DestroyProcessTapSet(_taps,^OSStatus(AudioObjectID tap){return AudioHardwareDestroyProcessTap(tap);});_globalDescription=nil;_globalTap=0;_running=NO;
     _state->meterEnabled=NO;_state->meterOutputOffset=0;_state->monitorEnabled=NO;_state->monitorLeft=0;_state->monitorRight=0;
     _state->tapCount=0;_state->physicalInputChannels=0;
     _state->meterReferenceFrame=0;
@@ -971,9 +1013,50 @@ static BOOL GuardSelfCheck(void) {
     return validDescription;
 }
 
+static BOOL TapRoutingSelfCheck(void) {
+    NSArray *groups=@[@[@101],@[],@[],@[],@[],@[]],*empty=@[@[],@[],@[],@[],@[],@[]];
+    NSDictionary *names=@{@101:@"org.live.app",@201:@"org.live.app",@999:@"local.tx6mac.mixer"};
+    TXTapBundleReader reader=^NSString*(AudioObjectID process){return names[@(process)]?:@"";};NSError *error=nil;
+    NSArray *legacy=PlanProcessTaps(groups,nil,@[@999],@"local.tx6mac.mixer",reader,&error);
+    if(!legacy||error||legacy.count!=2||[legacy[0][@"slot"] intValue]!=0||[legacy[1][@"slot"] intValue]!=6)return NO;
+    CATapDescription *live=legacy[0][@"description"],*remainder=legacy[1][@"description"];
+    if(![live.processes isEqual:@[@101]]||![live.bundleIDs isEqual:@[@"org.live.app"]]||live.exclusive||![remainder.processes isEqual:@[@999,@101]]||![remainder.bundleIDs isEqual:@[@"local.tx6mac.mixer",@"org.live.app"]]||!remainder.exclusive)return NO;
+    NSArray *metadata=@[@[@"org.live.app"],@[],@[@"org.closed.app",@"org.closed.helper"],@[],@[],@[]];
+    NSArray *plan=PlanProcessTaps(groups,metadata,@[@999],@"local.tx6mac.mixer",reader,&error);
+    if(!plan||error||plan.count!=3||[plan[1][@"slot"] intValue]!=2)return NO;
+    CATapDescription *closed=plan[1][@"description"];remainder=plan[2][@"description"];
+    if(closed.processes.count||closed.exclusive||!closed.privateTap||!closed.processRestoreEnabled||closed.muteBehavior!=CATapMutedWhenTapped||![closed.bundleIDs isEqual:metadata[2]]||![remainder.processes isEqual:@[@999,@101]])return NO;
+    for(NSString *bundle in @[@"org.live.app",@"org.closed.app",@"org.closed.helper",@"local.tx6mac.mixer"])if(![remainder.bundleIDs containsObject:bundle])return NO;
+    if(PlanProcessTaps(groups,@[],@[@999],@"local.tx6mac.mixer",reader,&error)||!error)return NO;
+    for(id bad in @[@"pid:123",@"chrome-tab:123",@"app-group:123",@"local.tx6mac.system-sounds",@"local.tx6mac.mixer",@"contains space",@"",@7]){
+        NSMutableArray *rows=[empty mutableCopy];rows[2]=@[bad];if(PlanProcessTaps(groups,rows,@[@999],@"local.tx6mac.mixer",reader,&error)||!error)return NO;
+    }
+    NSMutableArray *overlap=[metadata mutableCopy];overlap[4]=@[@"org.closed.app"];
+    if(PlanProcessTaps(groups,overlap,@[@999],@"local.tx6mac.mixer",reader,&error)||!error)return NO;
+    NSArray *currentOverlap=@[@[@101],@[@201],@[],@[],@[],@[]];
+    if(PlanProcessTaps(currentOverlap,empty,@[@999],@"local.tx6mac.mixer",reader,&error)||!error)return NO;
+    if(!PlanProcessTaps(currentOverlap,nil,@[@999],@"local.tx6mac.mixer",reader,&error)||error)return NO;
+    NSMutableString *name=[NSMutableString stringWithString:@"org.snapshot.app"];NSMutableArray *row=[NSMutableArray arrayWithObject:name],*mutable=[empty mutableCopy];mutable[2]=row;
+    TXAudio *audio=[TXAudio new];audio.slotBundleIDs=mutable;[name appendString:@".changed"];[row removeAllObjects];mutable[2]=@[];
+    if(![audio.slotBundleIDs[2] isEqual:@[@"org.snapshot.app"]])return NO;[audio stop];if(![audio.slotBundleIDs[2] isEqual:@[@"org.snapshot.app"]])return NO;
+    audio.slotBundleIDs=nil;if(audio.slotBundleIDs)return NO;
+    audio.slotBundleIDs=(id)@[@[]];if(audio.slotBundleIDs.count)return NO;
+    for(int failure=0;failure<3;failure++){
+        __block int creates=0,formats=0;NSMutableArray *owned=[NSMutableArray array],*destroyed=[NSMutableArray array];
+        NSArray *created=CreateProcessTapSet(plan,owned,^OSStatus(CATapDescription *description,AudioObjectID *tap){creates++;*tap=100+creates;return failure==1&&creates==2?-801:noErr;},^OSStatus(AudioObjectID tap,AudioStreamBasicDescription *format){
+            formats++;*format=(AudioStreamBasicDescription){.mChannelsPerFrame=2,.mFormatID=kAudioFormatLinearPCM,.mFormatFlags=kAudioFormatFlagIsFloat,.mBitsPerChannel=32};return failure==2&&formats==2?-802:noErr;
+        },&error);
+        if(failure==0){if(!created||error||created.count!=3||owned.count!=3||[created[1][@"slot"] intValue]!=2)return NO;}
+        else if(created||!error||error.code!=(failure==1?-801:-802)||owned.count!=(failure==1?1:2))return NO;
+        NSArray *before=[owned copy];DestroyProcessTapSet(owned,^OSStatus(AudioObjectID tap){[destroyed addObject:@(tap)];return noErr;});
+        if(owned.count||![destroyed isEqual:before])return NO;
+    }
+    return YES;
+}
+
 BOOL TXRunSelfCheck(void) {
     __block BOOL guardOK=NO;dispatch_semaphore_t guardFinished=dispatch_semaphore_create(0);
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{guardOK=GuardSelfCheck()&&GuardProbeSelfCheck();dispatch_semaphore_signal(guardFinished);}});
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{@autoreleasepool{guardOK=GuardSelfCheck()&&GuardProbeSelfCheck()&&TapRoutingSelfCheck();dispatch_semaphore_signal(guardFinished);}});
     dispatch_semaphore_wait(guardFinished,DISPATCH_TIME_FOREVER);
     if(!guardOK){fprintf(stderr,"Mute guard lifecycle self-check failed.\n");return NO;}
 

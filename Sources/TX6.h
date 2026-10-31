@@ -63,6 +63,8 @@ uint64_t TXRequestLevelPeakReset(TXRenderState *state);
 @property(nonatomic,readonly) BOOL monitoring;
 @property(nonatomic) AudioDeviceID meterOutputDevice;
 @property(nonatomic,readonly) BOOL metering;
+// Six native bundle-ID rows, deeply copied on the HAL worker; nil preserves existing planning.
+@property(nonatomic,copy) NSArray<NSArray<NSString*>*> *slotBundleIDs;
 // HAL lifecycle and discovery are synchronous; call only on the app's serial HAL queue.
 - (BOOL)startOnDevice:(AudioDeviceID)device groups:(NSArray<NSArray<NSNumber*>*>*)groups;
 - (void)stop;
