@@ -187,3 +187,5 @@
 "선택한 USB 미터 장치가 변경되어 연결하지 않았습니다." = "The selected USB meter device changed and was not connected.";
 "미리 듣기 음량 %@" = "Monitor level %@";
 "미리 듣기 출력 꺼짐 · 저장된 음량 %@" = "Monitor output off · stored level %@";
+"스테레오 출력" = "Stereo output";
+"스테레오 출력입니다. 기기 페이더와 EQ도 적용됩니다. 앱의 6트랙 독립 출력 및 TX-6 AUX/CUE 라우팅은 지원하지 않습니다." = "Stereo output. Device faders and EQ also apply. Independent output of the app’s six tracks and TX-6 AUX/CUE routing are not supported.";
