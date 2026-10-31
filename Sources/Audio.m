@@ -33,6 +33,7 @@ static BOOL IsSystemSoundProcess(NSString *executablePath,NSString *bundleID) {
     return [executablePath isEqualToString:@"/usr/sbin/systemsoundserverd"] ||
         (!executablePath.length && [bundleID isEqualToString:@"systemsoundserverd"]);
 }
+static BOOL AddStreamRange(NSMutableIndexSet *covered,UInt32 start,UInt32 count,UInt32 total,UInt32 boundary);
 static OSStatus UseOnlyTapInputs(AudioDeviceID device,AudioDeviceIOProcID proc,UInt32 physical,UInt32 total) {
     if(!physical)return noErr;
     NSArray<NSNumber*> *streams=ReadIDs(device,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeInput);
@@ -48,9 +49,8 @@ static OSStatus UseOnlyTapInputs(AudioDeviceID device,AudioDeviceIOProcID proc,U
         address=Addr(kAudioStreamPropertyVirtualFormat,kAudioObjectPropertyScopeGlobal);size=sizeof(format);
         status=AudioObjectGetPropertyData(stream,&address,0,NULL,&size,&format);if(status!=noErr)break;
         UInt32 count=format.mChannelsPerFrame;
-        if(!start||start>total||!count||count>total-(start-1)||(start-1<physical&&count>physical-(start-1))){status=kAudioHardwareBadStreamError;break;}
-        NSRange range=NSMakeRange(start-1,count);if([covered intersectsIndexesInRange:range]){status=kAudioHardwareBadStreamError;break;}
-        [covered addIndexesInRange:range];usage->mStreamIsOn[i]=start-1>=physical;
+        if(!AddStreamRange(covered,start,count,total,physical)){status=kAudioHardwareBadStreamError;break;}
+        usage->mStreamIsOn[i]=start-1>=physical;
     }
     if(status==noErr&&covered.count!=total)status=kAudioHardwareBadStreamError;
     AudioObjectPropertyAddress address=Addr(kAudioDevicePropertyIOProcStreamUsage,kAudioDevicePropertyScopeInput);
@@ -66,16 +66,53 @@ static OSStatus UseOnlyTapInputs(AudioDeviceID device,AudioDeviceIOProcID proc,U
     }
     free(usage);return status;
 }
-static BOOL OutputLayout(NSArray<NSString*> *order,NSString *primary,NSString *meter,NSDictionary<NSString*,NSDictionary*> *counts,UInt32 *primaryOffset,UInt32 *meterOffset,UInt32 *inputs,UInt32 *outputs) {
-    if(order.count!=(meter.length?2:1)||[[NSSet setWithArray:order] count]!=order.count||![order containsObject:primary]||(meter.length&&![order containsObject:meter]))return NO;
-    *inputs=0;*outputs=0;*primaryOffset=0;*meterOffset=0;
-    for(NSString *uid in order){NSDictionary *count=counts[uid];if(!count)return NO;
-        UInt32 out=[count[@"out"] unsignedIntValue];if(out<2)return NO;
+static BOOL OutputLayout(NSArray<NSString*> *order,NSString *primary,NSString *monitor,NSString *meter,NSDictionary<NSString*,NSDictionary*> *counts,UInt32 *primaryOffset,UInt32 *monitorOffset,UInt32 *meterOffset,UInt32 *inputs,UInt32 *outputs) {
+    NSUInteger expected=1+(monitor.length?1:0)+(meter.length?1:0);
+    if(!primary.length||order.count!=expected||counts.count!=expected||[[NSSet setWithArray:order] count]!=expected||
+       ![order containsObject:primary]||(monitor.length&&(![order containsObject:monitor]||[monitor isEqualToString:primary]))||
+       (meter.length&&(![order containsObject:meter]||[meter isEqualToString:primary]||[meter isEqualToString:monitor])))return NO;
+    *inputs=0;*outputs=0;*primaryOffset=0;*monitorOffset=0;*meterOffset=0;
+    for(NSString *uid in order){NSDictionary *count=counts[uid];
+        if(![count isKindOfClass:NSDictionary.class]||![count[@"out"] isKindOfClass:NSNumber.class]||![count[@"in"] isKindOfClass:NSNumber.class])return NO;
+        double outValue=[count[@"out"] doubleValue],inValue=[count[@"in"] doubleValue];
+        if(!isfinite(outValue)||!isfinite(inValue)||outValue<2||outValue>UINT32_MAX||inValue<0||inValue>UINT32_MAX||floor(outValue)!=outValue||floor(inValue)!=inValue)return NO;
+        UInt32 out=(UInt32)outValue,in=(UInt32)inValue;
         if([uid isEqualToString:primary])*primaryOffset=*outputs;
+        else if([uid isEqualToString:monitor])*monitorOffset=*outputs;
         else if([uid isEqualToString:meter]){if(out!=12)return NO;*meterOffset=*outputs;}
         else return NO;
-        *inputs+=[count[@"in"] unsignedIntValue];*outputs+=out;
+        if(in>UINT32_MAX-*inputs||out>UINT32_MAX-*outputs)return NO;
+        *inputs+=in;*outputs+=out;
     }return YES;
+}
+static BOOL AddStreamRange(NSMutableIndexSet *covered,UInt32 start,UInt32 count,UInt32 total,UInt32 boundary) {
+    if(!start||start>total||!count||count>total-(start-1)||(start-1<boundary&&count>boundary-(start-1)))return NO;
+    NSRange range=NSMakeRange(start-1,count);if([covered intersectsIndexesInRange:range])return NO;
+    [covered addIndexesInRange:range];return YES;
+}
+static BOOL OutputStreamsValid(AudioDeviceID device,UInt32 total) {
+    NSMutableIndexSet *covered=[NSMutableIndexSet indexSet];
+    for(NSNumber *stream in ReadIDs(device,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeOutput)){
+        UInt32 start=0,size=sizeof(start);AudioStreamBasicDescription format={0};
+        AudioObjectPropertyAddress a=Addr(kAudioStreamPropertyStartingChannel,kAudioObjectPropertyScopeGlobal);
+        if(AudioObjectGetPropertyData(stream.unsignedIntValue,&a,0,NULL,&size,&start)!=noErr)return NO;
+        a=Addr(kAudioStreamPropertyVirtualFormat,kAudioObjectPropertyScopeGlobal);size=sizeof(format);
+        if(AudioObjectGetPropertyData(stream.unsignedIntValue,&a,0,NULL,&size,&format)!=noErr||!AddStreamRange(covered,start,format.mChannelsPerFrame,total,0))return NO;
+    }return covered.count==total;
+}
+static BOOL PreferredStereo(AudioDeviceID device,UInt32 count,UInt32 *left,UInt32 *right) {
+    UInt32 pair[2]={1,2},size=sizeof(pair);AudioObjectPropertyAddress a=Addr(kAudioDevicePropertyPreferredChannelsForStereo,kAudioDevicePropertyScopeOutput);
+    OSStatus status=AudioObjectGetPropertyData(device,&a,0,NULL,&size,pair);
+    if(status!=noErr){pair[0]=1;pair[1]=2;}
+    else if(size!=sizeof(pair))return NO;
+    if(!pair[0]||!pair[1]||pair[0]>count||pair[1]>count||pair[0]==pair[1])return NO;
+    *left=pair[0]-1;*right=pair[1]-1;return YES;
+}
+static BOOL RatesMatch(AudioDeviceID primary,AudioDeviceID other) {
+    Float64 a=0,b=0;UInt32 size=sizeof(a);AudioObjectPropertyAddress p=Addr(kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal);
+    if(AudioObjectGetPropertyData(primary,&p,0,NULL,&size,&a)!=noErr)return NO;
+    size=sizeof(b);if(AudioObjectGetPropertyData(other,&p,0,NULL,&size,&b)!=noErr)return NO;
+    return isfinite(a)&&isfinite(b)&&a>=8000&&b>=8000&&fabs(a-b)<=.001;
 }
 static void SetFilter(TXFilter *f,int band,double db,double rate) {
     double frequency=band==0?120:(band==1?1000:8000);
@@ -125,7 +162,11 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     if(channels!=s->physicalInputChannels+2*s->tapCount){atomic_store(&s->layoutFault,1);return noErr;}
     float *out[2];UInt32 os[2],of[2];
     if(!ChannelPointer(output,s->outputLeft,&out[0],&os[0],&of[0])||!ChannelPointer(output,s->outputRight,&out[1],&os[1],&of[1])){atomic_store(&s->layoutFault,2);return noErr;}
-    UInt32 frames=MIN(of[0],of[1]);float *in[TX_SLOTS][2];UInt32 stride[TX_SLOTS][2];
+    UInt32 frames=MIN(of[0],of[1]);float *monitor[2];UInt32 mos[2];
+    if(s->monitorEnabled)for(int c=0;c<2;c++){
+        UInt32 n=0;if(!ChannelPointer(output,c?s->monitorRight:s->monitorLeft,&monitor[c],&mos[c],&n)){atomic_store(&s->layoutFault,6);return noErr;}frames=MIN(frames,n);
+    }
+    float *in[TX_SLOTS][2];UInt32 stride[TX_SLOTS][2];
     float *meter[6][2];UInt32 ms[6][2];
     if(s->meterEnabled)for(int slot=0;slot<6;slot++)for(int c=0;c<2;c++){
         UInt32 n=0;if(!ChannelPointer(output,s->meterOutputOffset+slot*2+c,&meter[slot][c],&ms[slot][c],&n)){atomic_store(&s->layoutFault,5);return noErr;}frames=MIN(frames,n);
@@ -133,51 +174,72 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     for(int t=0;t<s->tapCount;t++)for(int c=0;c<2;c++){
         UInt32 n=0;if(!ChannelPointer(input,s->physicalInputChannels+t*2+c,&in[t][c],&stride[t][c],&n)){atomic_store(&s->layoutFault,3);return noErr;}frames=MIN(frames,n);
     }
-    float target[TX_SLOTS],peaks[TX_SLOTS]={0},outputPeak=0,usbPeak[6]={0};double usbEnergy[6]={0};
+    float target[TX_SLOTS],peaks[TX_SLOTS]={0},outputPeak=0,monitorPeak=0,usbPeak[6]={0};
+    UInt32 routes[TX_SLOTS];BOOL muted[TX_SLOTS];double usbEnergy[6]={0};
     BOOL reference=atomic_load(&s->meterReference);
     for(int t=0;t<s->tapCount;t++){
-        int slot=s->tapSlots[t];float rawGain=atomic_load(&s->gain[slot]);target[t]=atomic_load(&s->muted[slot])||!isfinite(rawGain)?0:fmaxf(0,fminf(1,rawGain));
+        int slot=s->tapSlots[t];float rawGain=atomic_load(&s->gain[slot]);muted[slot]=atomic_load(&s->muted[slot]);target[t]=muted[slot]||!isfinite(rawGain)?0:fmaxf(0,fminf(1,rawGain));
         for(int b=0;b<TX_EQ;b++){
             double requested=atomic_load(&s->eq[slot][b]);requested=isfinite(requested)?fmax(-18,fmin(18,requested)):0;double delta=requested-s->currentEQ[slot][b];
             if(fabs(delta)>0.00001){s->currentEQ[slot][b]+=fmax(-0.25,fmin(0.25,delta));SetFilter(&s->filters[slot][b],b,s->currentEQ[slot][b],s->sampleRate);}
         }
     }
-    float rawMaster=atomic_load(&s->master);
-    float master=atomic_load(&s->masterMuted)||!isfinite(rawMaster)?0:fmaxf(0,fminf(1,rawMaster));
+    for(int slot=0;slot<TX_SLOTS;slot++)routes[slot]=slot==6?TXOutputMain:atomic_load(&s->route[slot]);
+    float rawMaster=atomic_load(&s->master),rawMonitor=atomic_load(&s->monitorGain);
+    BOOL masterMuted=atomic_load(&s->masterMuted);
+    float master=masterMuted||!isfinite(rawMaster)?0:fmaxf(0,fminf(1,rawMaster));
+    float monitorTarget=isfinite(rawMonitor)?fmaxf(0,fminf(1,rawMonitor)):0;
     float smoothing=1-expf(-1/(0.015*s->sampleRate));
     float limiterRelease=1-expf(-1/(0.080*s->sampleRate));
     for(UInt32 f=0;f<frames;f++) {
-        float mix[2]={0},slotPCM[6][2]={0};
+        float mix[2]={0},monitorMix[2]={0},slotPCM[6][2]={0};
         for(int t=0;t<s->tapCount;t++){
             int slot=s->tapSlots[t];s->smoothGain[slot]+=smoothing*(target[t]-s->smoothGain[slot]);
             for(int c=0;c<2;c++){
                 float value=in[t][c][f*stride[t][c]];
                 for(int b=0;b<TX_EQ;b++)value=FilterSample(&s->filters[slot][b],c,value);
-                value*=s->smoothGain[slot];if(!isfinite(value))value=0;
-                peaks[slot]=fmaxf(peaks[slot],fabsf(value));mix[c]+=value;
+                value*=s->smoothGain[slot];if(!isfinite(value)||muted[slot])value=0;
+                peaks[slot]=fmaxf(peaks[slot],fabsf(value));
+                if(routes[slot]==TXOutputMain||routes[slot]==TXOutputBoth)mix[c]+=value;
+                if(s->monitorEnabled&&(routes[slot]==TXOutputMonitor||routes[slot]==TXOutputBoth))monitorMix[c]+=value;
                 if(s->meterEnabled&&slot<6)slotPCM[slot][c]=value;
             }
         }
         s->smoothMaster+=smoothing*(master-s->smoothMaster);
+        s->smoothMonitorGain+=smoothing*(monitorTarget-s->smoothMonitorGain);
+        float masterGain=masterMuted?0:s->smoothMaster;
+        float monitorGain=monitorTarget>0?s->smoothMonitorGain:0;
         float test=reference?MeterReference(s->meterReferenceFrame,s->sampleRate):0;
         if(s->meterEnabled)for(int slot=0;slot<6;slot++){
-            float l=slotPCM[slot][0]*s->smoothMaster,r=slotPCM[slot][1]*s->smoothMaster;
-            if(reference)l=r=slot==1?test:0;
+            float mirrorGain=0;
+            if(routes[slot]==TXOutputMain||routes[slot]==TXOutputBoth)mirrorGain=masterGain;
+            else if(routes[slot]==TXOutputMonitor&&s->monitorEnabled)mirrorGain=masterGain*monitorGain;
+            float l=slotPCM[slot][0]*mirrorGain,r=slotPCM[slot][1]*mirrorGain;
+            if(reference)l=r=slot==1&&!masterMuted?test:0;
             if(!isfinite(l))l=0;if(!isfinite(r))r=0;
             float p=fmaxf(fabsf(l),fabsf(r)),g=p>0.98f?0.98f/p:1;
             meter[slot][0][f*ms[slot][0]]=l*g;meter[slot][1][f*ms[slot][1]]=r*g;
             usbPeak[slot]=fmaxf(usbPeak[slot],p*g);usbEnergy[slot]+=(double)(l*g)*(l*g)+(double)(r*g)*(r*g);
         }
         if(reference)s->meterReferenceFrame++;
-        float peak=fmaxf(fabsf(mix[0]),fabsf(mix[1]))*s->smoothMaster;
-        float required=peak>0.98f?0.98f/peak:1;
-        // Share limiter gain across both channels to preserve the stereo image.
-        if(required<s->limiterGain)s->limiterGain=required;
-        else s->limiterGain+=limiterRelease*(required-s->limiterGain);
-        if(s->limiterGain<0.999f)atomic_fetch_add_explicit(&s->limitedFrames,1,memory_order_relaxed);
-        for(int c=0;c<2;c++){float value=fmaxf(-0.98f,fminf(0.98f,mix[c]*s->smoothMaster*s->limiterGain));out[c][f*os[c]]=value;outputPeak=fmaxf(outputPeak,fabsf(value));}
+        BOOL limited=NO;
+        for(int bus=0;bus<(s->monitorEnabled?2:1);bus++){
+            float *pcm=bus?monitorMix:mix;float gain=masterGain*(bus?monitorGain:1);
+            float peak=fmaxf(fabsf(pcm[0]),fabsf(pcm[1]))*gain;
+            float required=peak>0.98f?0.98f/peak:1;
+            float *limiter=bus?&s->monitorLimiterGain:&s->limiterGain;
+            if(required<*limiter)*limiter=required;
+            else *limiter+=limiterRelease*(required-*limiter);
+            if(*limiter<0.999f)limited=YES;
+            for(int c=0;c<2;c++){
+                float value=fmaxf(-0.98f,fminf(0.98f,pcm[c]*gain*(*limiter)));
+                if(bus){monitor[c][f*mos[c]]=value;monitorPeak=fmaxf(monitorPeak,fabsf(value));}
+                else{out[c][f*os[c]]=value;outputPeak=fmaxf(outputPeak,fabsf(value));}
+            }
+        }
+        if(limited)atomic_fetch_add_explicit(&s->limitedFrames,1,memory_order_relaxed);
     }
-    for(int slot=0;slot<TX_SLOTS;slot++)atomic_store(&s->peak[slot],peaks[slot]);atomic_store(&s->outputPeak,outputPeak);
+    for(int slot=0;slot<TX_SLOTS;slot++)atomic_store(&s->peak[slot],peaks[slot]);atomic_store(&s->outputPeak,outputPeak);atomic_store(&s->monitorPeak,monitorPeak);
     for(int slot=0;slot<6;slot++){atomic_store(&s->usbPeak[slot],usbPeak[slot]);atomic_store(&s->usbRMS[slot],frames?sqrt(usbEnergy[slot]/(2*frames)):0);}
     atomic_fetch_add(&s->callbacks,1);atomic_fetch_add(&s->frames,frames);return noErr;
 }
@@ -191,11 +253,12 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     AudioObjectID _globalTap;
     BOOL _running;
 }
-- (instancetype)init {if((self=[super init])){_state=calloc(1,sizeof(*_state));_taps=[NSMutableArray array];atomic_store(&_state->master,1);for(int i=0;i<TX_SLOTS;i++)atomic_store(&_state->gain[i],1);}return self;}
+- (instancetype)init {if((self=[super init])){_state=calloc(1,sizeof(*_state));_taps=[NSMutableArray array];atomic_store(&_state->master,1);atomic_store(&_state->monitorGain,1);for(int i=0;i<TX_SLOTS;i++)atomic_store(&_state->gain[i],1);}return self;}
 - (TXRenderState*)state{return _state;}
 - (BOOL)running{return _running;}
 - (AudioDeviceID)device{return _device;}
 - (BOOL)metering{return _running&&_state->meterEnabled;}
+- (BOOL)monitoring{return _running&&_state->monitorEnabled;}
 + (AudioDeviceID)defaultOutput{return ReadUInt(kAudioObjectSystemObject,kAudioHardwarePropertyDefaultOutputDevice);}
 + (NSString*)uid:(AudioDeviceID)device{return ReadString(device,kAudioDevicePropertyDeviceUID);}
 + (NSArray<NSDictionary*>*)outputs {
@@ -244,19 +307,21 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     }
     NSString *uid=[TXAudio uid:device];if(!uid.length)return [self fail:TXL(@"출력 장치 없음") status:-1];
     if(Channels(device,kAudioDevicePropertyScopeOutput)<2)return [self fail:TXL(@"스테레오 출력 장치가 필요합니다") status:-12];
-    AudioDeviceID meter=self.meterOutputDevice;NSString *meterUID=meter?[TXAudio uid:meter]:@"";
+    AudioDeviceID monitor=self.monitorOutputDevice,meter=self.meterOutputDevice;
+    NSString *monitorUID=monitor?[TXAudio uid:monitor]:@"",*meterUID=meter?[TXAudio uid:meter]:@"";
+    if(monitor){
+        if(monitor==device||!monitorUID.length||[monitorUID isEqualToString:uid]||Channels(monitor,kAudioDevicePropertyScopeOutput)<2)return [self fail:TXL(@"서로 다른 스테레오 모니터 장치가 필요합니다") status:-24];
+        if(!RatesMatch(device,monitor))return [self fail:TXL(@"메인과 모니터 샘플레이트가 일치해야 합니다") status:-26];
+    }
     if(meter){
         NSString *name=ReadString(meter,kAudioObjectPropertyName).uppercaseString;
-        if(meter==device||!meterUID.length||[meterUID isEqualToString:uid]||ReadUInt(meter,kAudioDevicePropertyTransportType)!=kAudioDeviceTransportTypeUSB||Channels(meter,kAudioDevicePropertyScopeOutput)!=12||(![name containsString:@"TX-6"]&&![name containsString:@"TX6"]))return [self fail:TXL(@"출력 장치 없음") status:-20];
-        Float64 primaryRate=0,meterRate=0;UInt32 rateSize=sizeof(Float64);AudioObjectPropertyAddress ra=Addr(kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal);
-        OSStatus a=AudioObjectGetPropertyData(device,&ra,0,NULL,&rateSize,&primaryRate);rateSize=sizeof(Float64);
-        OSStatus b=AudioObjectGetPropertyData(meter,&ra,0,NULL,&rateSize,&meterRate);
-        if(a!=noErr||b!=noErr||!isfinite(primaryRate)||!isfinite(meterRate)||primaryRate<8000||fabs(primaryRate-meterRate)>.001)return [self fail:TXL(@"샘플레이트 확인") status:-21];
+        if(meter==device||meter==monitor||!meterUID.length||[meterUID isEqualToString:uid]||[meterUID isEqualToString:monitorUID]||ReadUInt(meter,kAudioDevicePropertyTransportType)!=kAudioDeviceTransportTypeUSB||Channels(meter,kAudioDevicePropertyScopeOutput)!=12||(![name containsString:@"TX-6"]&&![name containsString:@"TX6"]))return [self fail:TXL(@"출력 장치 없음") status:-20];
+        if(!RatesMatch(device,meter))return [self fail:TXL(@"샘플레이트 확인") status:-21];
     }
-    _state->physicalInputChannels=Channels(device,kAudioDevicePropertyScopeInput);_state->tapCount=0;
-    _state->outputLeft=0;_state->outputRight=1;
-    UInt32 stereo[2]={1,2},size=sizeof(stereo);AudioObjectPropertyAddress stereoAddr=Addr(kAudioDevicePropertyPreferredChannelsForStereo,kAudioDevicePropertyScopeOutput);
-    if(AudioObjectGetPropertyData(device,&stereoAddr,0,NULL,&size,stereo)==noErr&&stereo[0]&&stereo[1]){_state->outputLeft=stereo[0]-1;_state->outputRight=stereo[1]-1;}
+    _state->physicalInputChannels=0;_state->tapCount=0;
+    if(!PreferredStereo(device,Channels(device,kAudioDevicePropertyScopeOutput),&_state->outputLeft,&_state->outputRight))return [self fail:TXL(@"스테레오 출력 장치가 필요합니다") status:-23];
+    if(monitor&&!PreferredStereo(monitor,Channels(monitor,kAudioDevicePropertyScopeOutput),&_state->monitorLeft,&_state->monitorRight))return [self fail:TXL(@"모니터 스테레오 채널 확인") status:-27];
+    UInt32 size=0;
     NSMutableArray *excluded=[NSMutableArray array];
     // Exclude this process from the global tap to prevent feedback.
     for(NSNumber *n in ReadIDs(kAudioObjectSystemObject,kAudioHardwarePropertyProcessObjectList,kAudioObjectPropertyScopeGlobal))if((pid_t)ReadUInt(n.unsignedIntValue,kAudioProcessPropertyPID)==getpid())[excluded addObject:n];
@@ -281,6 +346,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         [tapList addObject:@{@kAudioSubTapUIDKey:desc.UUID.UUIDString,@kAudioSubTapDriftCompensationKey:@YES}];
     }
     NSMutableArray *subdevices=[NSMutableArray arrayWithObject:@{@kAudioSubDeviceUIDKey:uid}];
+    if(monitor)[subdevices addObject:@{@kAudioSubDeviceUIDKey:monitorUID,@kAudioSubDeviceDriftCompensationKey:@YES}];
     if(meter)[subdevices addObject:@{@kAudioSubDeviceUIDKey:meterUID,@kAudioSubDeviceDriftCompensationKey:@YES}];
     // Non-stacked outputs keep each device's channels independently addressable.
     NSDictionary *description=@{@kAudioAggregateDeviceUIDKey:[@"local.tx6mac." stringByAppendingString:NSUUID.UUID.UUIDString],@kAudioAggregateDeviceNameKey:@"TX6Mac Mixer",@kAudioAggregateDeviceIsPrivateKey:@YES,@kAudioAggregateDeviceIsStackedKey:@NO,@kAudioAggregateDeviceMainSubDeviceKey:uid,@kAudioAggregateDeviceSubDeviceListKey:subdevices,@kAudioAggregateDeviceTapListKey:tapList,@kAudioAggregateDeviceTapAutoStartKey:@NO};
@@ -291,11 +357,15 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     NSArray *fullOrder=CFBridgingRelease(fullList);
     NSMutableDictionary *counts=[NSMutableDictionary dictionaryWithObject:@{@"in":@(Channels(device,kAudioDevicePropertyScopeInput)),@"out":@(Channels(device,kAudioDevicePropertyScopeOutput))} forKey:uid];
     if(meter)counts[meterUID]=@{@"in":@(Channels(meter,kAudioDevicePropertyScopeInput)),@"out":@(Channels(meter,kAudioDevicePropertyScopeOutput))};
-    UInt32 mainOffset=0,meterOffset=0,totalInputs=0,totalOutputs=0;
-    if(status!=noErr||!OutputLayout(fullOrder,uid,meterUID,counts,&mainOffset,&meterOffset,&totalInputs,&totalOutputs)||Channels(_aggregate,kAudioDevicePropertyScopeOutput)!=totalOutputs)return [self fail:TXL(@"프로그램 오디오 채널 순서 확인") status:-22];
+    if(monitor)counts[monitorUID]=@{@"in":@(Channels(monitor,kAudioDevicePropertyScopeInput)),@"out":@(Channels(monitor,kAudioDevicePropertyScopeOutput))};
+    UInt32 mainOffset=0,monitorOffset=0,meterOffset=0,totalInputs=0,totalOutputs=0;
+    if(status!=noErr||!OutputLayout(fullOrder,uid,monitorUID,meterUID,counts,&mainOffset,&monitorOffset,&meterOffset,&totalInputs,&totalOutputs)||Channels(_aggregate,kAudioDevicePropertyScopeOutput)!=totalOutputs||!OutputStreamsValid(_aggregate,totalOutputs))return [self fail:TXL(@"프로그램 오디오 채널 순서 확인") status:-22];
     UInt32 mainOutputs=[counts[uid][@"out"] unsignedIntValue];
     if(_state->outputLeft>=mainOutputs||_state->outputRight>=mainOutputs||_state->outputLeft==_state->outputRight)return [self fail:TXL(@"스테레오 출력 장치가 필요합니다") status:-23];
     _state->outputLeft+=mainOffset;_state->outputRight+=mainOffset;_state->physicalInputChannels=totalInputs;
+    UInt32 monitorOutputs=[counts[monitorUID][@"out"] unsignedIntValue];
+    if(monitor&&(_state->monitorLeft>=monitorOutputs||_state->monitorRight>=monitorOutputs||_state->monitorLeft==_state->monitorRight))return [self fail:TXL(@"모니터 스테레오 채널 확인") status:-27];
+    _state->monitorLeft+=monitorOffset;_state->monitorRight+=monitorOffset;_state->monitorEnabled=monitor!=0;
     _state->meterOutputOffset=meterOffset;_state->meterEnabled=meter!=0;
     CFArrayRef activeTapUIDs=NULL;size=sizeof(activeTapUIDs);AudioObjectPropertyAddress tapOrderAddr=Addr(kAudioAggregateDevicePropertyTapList,kAudioObjectPropertyScopeGlobal);
     status=AudioObjectGetPropertyData(_aggregate,&tapOrderAddr,0,NULL,&size,&activeTapUIDs);
@@ -308,10 +378,13 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         if(status!=noErr||f.mFormatID!=kAudioFormatLinearPCM||!(f.mFormatFlags&kAudioFormatFlagIsFloat)||f.mBitsPerChannel!=32)return [self fail:TXL(@"지원하지 않는 오디오 형식") status:status?:-2];
     }
     Float64 rate=48000;size=sizeof(rate);AudioObjectPropertyAddress rateAddr=Addr(kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal);
-    status=AudioObjectGetPropertyData(_aggregate,&rateAddr,0,NULL,&size,&rate);if(status!=noErr||rate<8000)return [self fail:TXL(@"샘플레이트 확인") status:status?:-3];_state->sampleRate=rate;
-    if(meter){Float64 mr=0;size=sizeof(mr);status=AudioObjectGetPropertyData(meter,&rateAddr,0,NULL,&size,&mr);if(status!=noErr||!isfinite(mr)||!isfinite(rate)||fabs(mr-rate)>.001)return [self fail:TXL(@"샘플레이트 확인") status:-21];}
+    status=AudioObjectGetPropertyData(_aggregate,&rateAddr,0,NULL,&size,&rate);if(status!=noErr||!isfinite(rate)||rate<8000)return [self fail:TXL(@"샘플레이트 확인") status:status?:-3];_state->sampleRate=rate;
+    if(!RatesMatch(device,_aggregate))return [self fail:TXL(@"샘플레이트 확인") status:-21];
+    if(meter&&!RatesMatch(device,meter))return [self fail:TXL(@"샘플레이트 확인") status:-21];
+    if(monitor&&!RatesMatch(device,monitor))return [self fail:TXL(@"메인과 모니터 샘플레이트가 일치해야 합니다") status:-26];
     atomic_store(&_state->layoutFault,0);atomic_store(&_state->callbacks,0);atomic_store(&_state->frames,0);
-    atomic_store(&_state->outputPeak,0);_state->smoothMaster=0;_state->limiterGain=1;atomic_store(&_state->limitedFrames,0);
+    atomic_store(&_state->outputPeak,0);atomic_store(&_state->monitorPeak,0);_state->smoothMaster=0;_state->limiterGain=1;
+    _state->smoothMonitorGain=0;_state->monitorLimiterGain=1;atomic_store(&_state->limitedFrames,0);
     for(int slot=0;slot<TX_SLOTS;slot++){_state->smoothGain[slot]=0;for(int b=0;b<TX_EQ;b++){memset(&_state->filters[slot][b],0,sizeof(TXFilter));_state->currentEQ[slot][b]=atomic_load(&_state->eq[slot][b]);SetFilter(&_state->filters[slot][b],b,_state->currentEQ[slot][b],rate);}}
     status=AudioDeviceCreateIOProcID(_aggregate,Render,_state,&_proc);if(status!=noErr)return [self fail:TXL(@"오디오 처리 연결") status:status];
     // Disable hardware inputs; capture only the authorized process taps.
@@ -335,7 +408,10 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     if(_aggregate&&_proc){AudioDeviceStop(_aggregate,_proc);AudioDeviceDestroyIOProcID(_aggregate,_proc);}_proc=NULL;
     if(_aggregate)AudioHardwareDestroyAggregateDevice(_aggregate);_aggregate=0;
     for(NSNumber *n in _taps)AudioHardwareDestroyProcessTap(n.unsignedIntValue);[_taps removeAllObjects];_globalDescription=nil;_globalTap=0;_running=NO;
-    _state->meterEnabled=NO;_state->meterOutputOffset=0;
+    _state->meterEnabled=NO;_state->meterOutputOffset=0;_state->monitorEnabled=NO;_state->monitorLeft=0;_state->monitorRight=0;
+    _state->tapCount=0;_state->physicalInputChannels=0;
+    _state->meterReferenceFrame=0;
+    atomic_store(&_state->monitorPeak,0);atomic_store(&_state->callbacks,0);atomic_store(&_state->frames,0);atomic_store(&_state->limitedFrames,0);atomic_store(&_state->layoutFault,0);
     for(int slot=0;slot<TX_SLOTS;slot++)atomic_store(&_state->peak[slot],0);atomic_store(&_state->outputPeak,0);
     for(int slot=0;slot<6;slot++){atomic_store(&_state->usbPeak[slot],0);atomic_store(&_state->usbRMS[slot],0);}
 }
@@ -401,10 +477,35 @@ int TXCheckUSBMeterRoute(BOOL direct) {
 }
 
 BOOL TXRunSelfCheck(void) {
-    UInt32 po=0,mo=0,ic=0,oc=0;NSDictionary *counts=@{@"main":@{@"in":@1,@"out":@2},@"meter":@{@"in":@12,@"out":@12}};
-    if(!OutputLayout(@[@"main",@"meter"],@"main",@"meter",counts,&po,&mo,&ic,&oc)||po!=0||mo!=2||ic!=13||oc!=14)return NO;
-    if(!OutputLayout(@[@"meter",@"main"],@"main",@"meter",counts,&po,&mo,&ic,&oc)||po!=12||mo!=0||ic!=13||oc!=14)return NO;
-    if(OutputLayout(@[@"main",@"main"],@"main",@"meter",counts,&po,&mo,&ic,&oc))return NO;
+    UInt32 po=0,no=0,mo=0,ic=0,oc=0;NSDictionary *counts=@{@"main":@{@"in":@1,@"out":@2},@"meter":@{@"in":@12,@"out":@12}};
+    if(!OutputLayout(@[@"main",@"meter"],@"main",@"",@"meter",counts,&po,&no,&mo,&ic,&oc)||po!=0||mo!=2||ic!=13||oc!=14)return NO;
+    if(!OutputLayout(@[@"meter",@"main"],@"main",@"",@"meter",counts,&po,&no,&mo,&ic,&oc)||po!=12||mo!=0||ic!=13||oc!=14)return NO;
+    if(OutputLayout(@[@"main",@"main"],@"main",@"",@"meter",counts,&po,&no,&mo,&ic,&oc))return NO;
+    NSDictionary *three=@{@"main":@{@"in":@1,@"out":@2},@"monitor":@{@"in":@3,@"out":@4},@"meter":@{@"in":@12,@"out":@12}};
+    NSArray *orders=@[@[@"main",@"monitor",@"meter"],@[@"meter",@"monitor",@"main"],@[@"monitor",@"main",@"meter"],@[@"main",@"meter",@"monitor"],@[@"monitor",@"meter",@"main"],@[@"meter",@"main",@"monitor"]];
+    UInt32 offsets[6][3]={{0,2,6},{16,12,0},{4,0,6},{0,14,2},{16,0,4},{12,14,0}};
+    for(int i=0;i<6;i++)if(!OutputLayout(orders[i],@"main",@"monitor",@"meter",three,&po,&no,&mo,&ic,&oc)||po!=offsets[i][0]||no!=offsets[i][1]||mo!=offsets[i][2]||ic!=16||oc!=18)return NO;
+    if(OutputLayout(@[@"main",@"monitor"],@"main",@"monitor",@"meter",three,&po,&no,&mo,&ic,&oc)||
+       OutputLayout(@[@"main",@"monitor",@"monitor"],@"main",@"monitor",@"meter",three,&po,&no,&mo,&ic,&oc)||
+       OutputLayout(@[@"main",@"monitor",@"meter"],@"main",@"monitor",@"monitor",three,&po,&no,&mo,&ic,&oc))return NO;
+    NSMutableDictionary *bad=[three mutableCopy];
+    for(NSDictionary *entry in @[@{@"in":@0,@"out":@1},@{@"in":@-1,@"out":@4},@{@"in":@3,@"out":@4.5},@{@"in":@(UINT32_MAX),@"out":@4}]){
+        bad[@"monitor"]=entry;if(OutputLayout(orders[0],@"main",@"monitor",@"meter",bad,&po,&no,&mo,&ic,&oc))return NO;
+    }
+    bad=[three mutableCopy];bad[@"meter"]=@{@"in":@12,@"out":@2};
+    if(OutputLayout(orders[0],@"main",@"monitor",@"meter",bad,&po,&no,&mo,&ic,&oc))return NO;
+    for(NSArray *ranges in @[@[@[@17,@2],@[@1,@12],@[@13,@4]],@[@[@13,@4],@[@17,@2],@[@1,@12]]]){
+        NSMutableIndexSet *covered=[NSMutableIndexSet indexSet];
+        for(NSArray *range in ranges)if(!AddStreamRange(covered,[range[0] unsignedIntValue],[range[1] unsignedIntValue],18,0))return NO;
+        if(covered.count!=18||AddStreamRange(covered,1,1,18,0)||AddStreamRange(covered,19,1,18,0))return NO;
+    }
+    NSMutableIndexSet *inputCoverage=[NSMutableIndexSet indexSet];
+    if(!AddStreamRange(inputCoverage,17,2,20,16)||!AddStreamRange(inputCoverage,1,12,20,16)||!AddStreamRange(inputCoverage,19,2,20,16)||!AddStreamRange(inputCoverage,13,4,20,16)||inputCoverage.count!=20)return NO;
+    if(AddStreamRange([NSMutableIndexSet indexSet],16,2,20,16)||AddStreamRange([NSMutableIndexSet indexSet],0,2,20,16))return NO;
+    NSDictionary *single=@{@"main":@{@"in":@2,@"out":@2}};
+    if(!OutputLayout(@[@"main"],@"main",@"",@"",single,&po,&no,&mo,&ic,&oc)||po!=0||ic!=2||oc!=2)return NO;
+    NSDictionary *dual=@{@"main":@{@"in":@2,@"out":@2},@"monitor":@{@"in":@4,@"out":@12}};
+    if(!OutputLayout(@[@"monitor",@"main"],@"main",@"monitor",@"",dual,&po,&no,&mo,&ic,&oc)||po!=12||no!=0||ic!=6||oc!=14)return NO;
     if(!IsSystemSoundProcess(@"/usr/sbin/systemsoundserverd",@"systemsoundserverd") ||
        !IsSystemSoundProcess(nil,@"systemsoundserverd") ||
        IsSystemSoundProcess(@"/usr/sbin/coreaudiod",@"com.apple.audio.coreaudiod") ||
@@ -428,6 +529,10 @@ BOOL TXRunSelfCheck(void) {
     struct{UInt32 count;AudioBuffer buf[1];} output={1,{{8,sizeof(out),out}}};
     Render(0,NULL,(AudioBufferList*)&input,NULL,(AudioBufferList*)&output,NULL,&s);
     if(atomic_load(&s.frames)!=64||fabs(out[0]-0.3)>0.00001||fabs(atomic_load(&s.outputPeak)-0.3)>0.00001||out[2]!=0)return NO;
+    atomic_store(&s.route[0],TXOutputMonitor);
+    Render(0,NULL,(AudioBufferList*)&input,NULL,(AudioBufferList*)&output,NULL,&s);
+    if(fabs(out[0]-.2f)>1e-6){fprintf(stderr,"Missing monitor leaked to main: %f\n",out[0]);return NO;}
+    atomic_store(&s.route[0],TXOutputMain);
     atomic_store(&s.muted[0],true);s.smoothGain[0]=0;
     Render(0,NULL,(AudioBufferList*)&input,NULL,(AudioBufferList*)&output,NULL,&s);
     if(fabs(out[0]-0.2)>0.00001)return NO;
@@ -498,6 +603,91 @@ BOOL TXRunSelfCheck(void) {
         for(int c=0;c<12;c++)if(c!=2&&c!=3&&multi[f*14+c]!=0)return NO;
     }
     if(atomic_load(&m.usbPeak[1])<=0||atomic_load(&m.usbRMS[1])<=0||atomic_load(&m.usbPeak[0])!=0)return NO;
+    // Main, monitor, and USB mirror share one source-processing pass.
+    TXRenderState routed={0};routed.sampleRate=48000;routed.tapCount=2;routed.tapSlots[0]=0;routed.tapSlots[1]=6;
+    routed.outputLeft=0;routed.outputRight=1;routed.monitorEnabled=YES;routed.monitorLeft=2;routed.monitorRight=3;
+    routed.meterEnabled=YES;routed.meterOutputOffset=4;routed.smoothMaster=1;routed.smoothMonitorGain=1;routed.limiterGain=1;routed.monitorLimiterGain=1;
+    atomic_store(&routed.master,1);atomic_store(&routed.monitorGain,1);atomic_store(&routed.route[6],TXOutputOff);
+    for(int slot=0;slot<7;slot++){atomic_store(&routed.gain[slot],1);routed.smoothGain[slot]=1;for(int band=0;band<3;band++)SetFilter(&routed.filters[slot][band],band,0,48000);}
+    float source[128],remainder[128],buses[16*64];
+    for(int f=0;f<64;f++){source[2*f]=.1f;source[2*f+1]=-.05f;remainder[2*f]=.2f;remainder[2*f+1]=-.1f;}
+    struct{UInt32 count;AudioBuffer buf[2];} ri={2,{{2,sizeof(source),source},{2,sizeof(remainder),remainder}}};
+    struct{UInt32 count;AudioBuffer buf[3];} ro={3,{{2,64*2*sizeof(float),buses},{2,64*2*sizeof(float),buses+128},{12,64*12*sizeof(float),buses+256}}};
+    UInt32 routeCases[]={TXOutputMain,TXOutputMonitor,TXOutputBoth,TXOutputOff,UINT32_MAX};
+    float mainCases[]={.3f,.2f,.3f,.2f,.2f},monitorCases[]={0,.1f,.1f,0,0},mirrorCases[]={.1f,.1f,.1f,0,0};
+    for(int i=0;i<5;i++){
+        atomic_store(&routed.route[0],routeCases[i]);Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+        for(int f=0;f<64;f++){
+            if(fabsf(buses[2*f]-mainCases[i])>1e-6||fabsf(buses[2*f+1]+mainCases[i]*.5f)>1e-6||fabsf(buses[128+2*f]-monitorCases[i])>1e-6||fabsf(buses[129+2*f]+monitorCases[i]*.5f)>1e-6||fabsf(buses[256+12*f]-mirrorCases[i])>1e-6)return NO;
+            for(int c=2;c<12;c++)if(buses[256+12*f+c]!=0)return NO;
+        }
+    }
+    atomic_store(&routed.route[0],TXOutputMonitor);routed.monitorEnabled=NO;
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(fabsf(buses[0]-.2f)>1e-6||buses[128]!=0||buses[256]!=0||atomic_load(&routed.monitorPeak)!=0)return NO;
+    routed.monitorEnabled=YES;atomic_store(&routed.route[0],TXOutputBoth);atomic_store(&routed.monitorGain,.5f);routed.smoothMonitorGain=.5f;
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(fabsf(buses[0]-.3f)>1e-6||fabsf(buses[128]-.05f)>1e-6||fabsf(buses[256]-.1f)>1e-6||fabsf(atomic_load(&routed.monitorPeak)-.05f)>1e-6)return NO;
+    atomic_store(&routed.master,.5f);routed.smoothMaster=.5f;
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(fabsf(buses[0]-.15f)>1e-6||fabsf(buses[128]-.025f)>1e-6)return NO;
+    atomic_store(&routed.master,1);routed.smoothMaster=1;atomic_store(&routed.route[0],TXOutputMonitor);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(fabsf(buses[0]-.2f)>1e-6||fabsf(buses[256]-.05f)>1e-6)return NO;
+    atomic_store(&routed.monitorGain,0);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(fabsf(buses[0]-.2f)>1e-6||buses[128]!=0||buses[256]!=0)return NO;
+    atomic_store(&routed.monitorGain,1);routed.smoothMonitorGain=0;
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(fabsf(buses[128]-.1f*(1-expf(-1/(.015f*48000))))>1e-7||buses[254]<=buses[128]||buses[254]>=.1f)return NO;
+    routed.smoothMonitorGain=1;atomic_store(&routed.route[0],TXOutputBoth);atomic_store(&routed.muted[0],true);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(fabsf(buses[0]-.2f)>1e-6||buses[128]!=0||buses[256]!=0)return NO;
+    atomic_store(&routed.masterMuted,true);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    for(int i=0;i<16*64;i++)if(buses[i]!=0)return NO;
+    atomic_store(&routed.masterMuted,false);routed.smoothMaster=1;
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(!atomic_load(&routed.muted[0])||buses[128]!=0||fabsf(buses[0]-.2f)>1e-6)return NO;
+    atomic_store(&routed.muted[0],false);routed.smoothGain[0]=1;atomic_store(&routed.route[0],TXOutputMonitor);
+    for(int f=0;f<64;f++){remainder[2*f]=8;remainder[2*f+1]=-4;}
+    routed.limiterGain=1;routed.monitorLimiterGain=1;
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    for(int f=0;f<64;f++)if(fabsf(buses[2*f]-.98f)>1e-6||fabsf(buses[2*f+1]+.49f)>1e-6||fabsf(buses[128+2*f]-.1f)>1e-6)return NO;
+    for(int f=0;f<64;f++){source[2*f]=8;source[2*f+1]=-4;remainder[2*f]=.2f;remainder[2*f+1]=-.1f;}
+    routed.limiterGain=1;routed.monitorLimiterGain=1;
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    for(int f=0;f<64;f++)if(fabsf(buses[2*f]-.2f)>1e-6||fabsf(buses[128+2*f]-.98f)>1e-6||fabsf(buses[129+2*f]+.49f)>1e-6)return NO;
+    if(!atomic_load(&routed.limitedFrames))return NO;
+    for(int f=0;f<64;f++){source[2*f]=8;source[2*f+1]=-4;remainder[2*f]=8;remainder[2*f+1]=-4;}
+    routed.limiterGain=1;routed.monitorLimiterGain=1;atomic_store(&routed.frames,0);atomic_store(&routed.limitedFrames,0);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(atomic_load(&routed.limitedFrames)!=64||atomic_load(&routed.frames)!=64)return NO;
+    for(int f=0;f<64;f++){source[2*f]=.1f;source[2*f+1]=-.05f;remainder[2*f]=.2f;remainder[2*f+1]=-.1f;}
+    routed.limiterGain=1;routed.monitorLimiterGain=1;
+    for(NSNumber *trim in @[@(NAN),@-1,@2]){
+        atomic_store(&routed.monitorGain,trim.floatValue);routed.smoothMonitorGain=trim.floatValue>1?1:0;
+        Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+        if(fabsf(buses[0]-.2f)>1e-6||fabsf(buses[128]-(trim.floatValue>1?.1f:0))>1e-6)return NO;
+    }
+    atomic_store(&routed.monitorGain,1);routed.smoothMonitorGain=1;atomic_store(&routed.route[0],TXOutputBoth);
+    atomic_store(&routed.eq[0][1],18);routed.currentEQ[0][1]=18;
+    memset(&routed.filters[0][1],0,sizeof(TXFilter));SetFilter(&routed.filters[0][1],1,18,48000);
+    TXRenderState eqMain;memcpy(&eqMain,&routed,sizeof(routed));eqMain.monitorEnabled=NO;eqMain.meterEnabled=NO;
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    float expectedFirst=.1f*routed.filters[0][1].b0;
+    if(fabsf(buses[0]-(.2f+expectedFirst))>1e-6||fabsf(buses[128]-expectedFirst)>1e-6||fabsf(buses[256]-expectedFirst)>1e-6)return NO;
+    float bothLast=buses[126];
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&eqMain);
+    if(fabsf(buses[126]-bothLast)>1e-6)return NO;
+    routed.monitorRight=16;atomic_store(&routed.layoutFault,0);
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    if(atomic_load(&routed.layoutFault)!=6)return NO;
+    for(int i=0;i<16*64;i++)if(buses[i]!=0)return NO;
+    TXAudio *controls=[TXAudio new];if(atomic_load(&controls.state->monitorGain)!=1||controls.monitoring)return NO;
+    atomic_store(&controls.state->route[0],TXOutputBoth);atomic_store(&controls.state->monitorGain,.4f);atomic_store(&controls.state->master,.7f);atomic_store(&controls.state->gain[0],.6f);
+    atomic_store(&controls.state->monitorPeak,.9f);atomic_store(&controls.state->usbPeak[0],.8f);[controls stop];
+    if(controls.monitoring||controls.state->monitorEnabled||controls.state->meterEnabled||atomic_load(&controls.state->monitorPeak)!=0||atomic_load(&controls.state->usbPeak[0])!=0||atomic_load(&controls.state->route[0])!=TXOutputBoth||atomic_load(&controls.state->monitorGain)!=.4f||atomic_load(&controls.state->master)!=.7f||atomic_load(&controls.state->gain[0])!=.6f)return NO;
     TXUSBReferenceState direct={.rate=48000,.frame=1000};DirectReference(0,NULL,NULL,NULL,(AudioBufferList*)&mout,NULL,&direct);
     if(atomic_load(&direct.frames)!=64||atomic_load(&direct.fault))return NO;
     for(int f=0;f<64;f++){float expected=pow(10,-18.0/20)*sin(2*M_PI*440*(1000+f)/48000);if(fabsf(multi[f*14+2]-expected)>1e-6||multi[f*14+2]!=multi[f*14+3])return NO;for(int c=0;c<14;c++)if(c!=2&&c!=3&&multi[f*14+c]!=0)return NO;}

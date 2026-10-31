@@ -6,10 +6,14 @@
 #define TX_SLOTS 7
 #define TX_EQ 3
 
+typedef NS_ENUM(UInt32, TXOutputRoute) { TXOutputMain=0, TXOutputMonitor=1, TXOutputBoth=2, TXOutputOff=3 };
+
 typedef struct { double b0,b1,b2,a1,a2,z1[2],z2[2]; } TXFilter;
 typedef struct {
     _Atomic(float) gain[TX_SLOTS], eq[TX_SLOTS][TX_EQ], master;
     _Atomic(bool) muted[TX_SLOTS], masterMuted;
+    _Atomic(UInt32) route[TX_SLOTS];
+    _Atomic(float) monitorGain, monitorPeak;
     _Atomic(float) peak[TX_SLOTS], outputPeak;
     _Atomic(float) usbPeak[6], usbRMS[6];
     _Atomic(bool) meterReference;
@@ -17,12 +21,15 @@ typedef struct {
     _Atomic(uint64_t) callbacks, frames, limitedFrames;
     _Atomic(int) layoutFault;
     float smoothGain[TX_SLOTS], smoothMaster, limiterGain;
+    float smoothMonitorGain, monitorLimiterGain;
     double currentEQ[TX_SLOTS][TX_EQ];
     TXFilter filters[TX_SLOTS][TX_EQ];
     _Atomic(double) sampleRate;
     _Atomic(UInt32) physicalInputChannels;
     UInt32 outputLeft, outputRight;
     // Immutable while the IOProc runs; configured only by the serial HAL worker.
+    BOOL monitorEnabled;
+    UInt32 monitorLeft, monitorRight;
     BOOL meterEnabled;
     UInt32 meterOutputOffset;
     int tapSlots[TX_SLOTS];
@@ -34,6 +41,8 @@ typedef struct {
 @property(nonatomic,readonly) BOOL running;
 @property(atomic,copy) NSString *lastError;
 @property(nonatomic,readonly) AudioDeviceID device;
+@property(nonatomic) AudioDeviceID monitorOutputDevice;
+@property(nonatomic,readonly) BOOL monitoring;
 @property(nonatomic) AudioDeviceID meterOutputDevice;
 @property(nonatomic,readonly) BOOL metering;
 // HAL lifecycle and discovery are synchronous; call only on the app's serial HAL queue.
