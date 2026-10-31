@@ -504,7 +504,7 @@ int TXProbeAudioMuteGuard(void) {
     dispatch_queue_t worker=dispatch_queue_create("local.tx6mac.mute-guard-stages",DISPATCH_QUEUE_SERIAL);
     dispatch_source_t watchdog=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0));
     dispatch_source_set_timer(watchdog,dispatch_time(DISPATCH_TIME_NOW,18*NSEC_PER_SEC),DISPATCH_TIME_FOREVER,0);
-    dispatch_source_set_event_handler(watchdog,^{GuardEvent(@"probe_timeout",nil,GuardError(@"HAL stage exceeded 18 seconds; private resources end with this diagnostic process",5));_Exit(5);});dispatch_resume(watchdog);
+    dispatch_source_set_event_handler(watchdog,^{_Exit(5);});dispatch_resume(watchdog);
     dispatch_async(worker,^{@autoreleasepool{
         TXGuardProbePCM *pcm=calloc(1,sizeof(*pcm));
         if(!pcm){result=3;dispatch_semaphore_signal(finished);return;}
