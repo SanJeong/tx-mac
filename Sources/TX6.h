@@ -38,6 +38,7 @@ typedef struct {
 
 // Own this guard independently of TXAudio; begin/end belong on the serial HAL worker.
 @interface TXAudioMuteGuard : NSObject
+// Tracks retained resources, including partial cleanup; it is not proof of source silence.
 @property(nonatomic,readonly) BOOL active;
 - (BOOL)begin:(NSError**)error;
 - (BOOL)end:(NSError**)error;
