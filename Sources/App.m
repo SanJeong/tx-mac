@@ -1,6 +1,7 @@
 #import "TX6.h"
 #import "BrowserBridge.h"
 #import "Localization.h"
+#import "Scenes.h"
 #import <CoreAudioKit/CoreAudioKit.h>
 #import <math.h>
 #import <CommonCrypto/CommonDigest.h>
@@ -1088,7 +1089,7 @@ int main(void) {
         if([args containsObject:@"--check-usb-meter-route"])return TXCheckUSBMeterRoute([args containsObject:@"--direct"]);
         if([args containsObject:@"--measure-usb-return"])return TXMeasureUSBReturn([args containsObject:@"--request-microphone"]);
         if([args containsObject:@"--ble-services"]||[args containsObject:@"--ble-observe"]||[args containsObject:@"--ble-ping"]||[args containsObject:@"--ble-ping-radio"]){NSUInteger target=[args containsObject:@"--ble-ping-radio"]?3:([args containsObject:@"--ble-ping"]?1:0);TXPrintBLEServices([args containsObject:@"--request-bluetooth"],target!=0||[args containsObject:@"--ble-observe"],target);return 0;}
-        if([args containsObject:@"--self-check"]){BOOL ok=TXRunSelfCheck() && TXRunMIDISelfCheck() && TXRunBrowserSelfCheck() && TXRunUIModelSelfCheck() && TXRunDeviceContextSelfCheck() && TXRunLocalizationSelfCheck() && [TXApp halSelfCheck];printf("TX6Mac DSP/render self-check: %s\n",ok?"PASS":"FAIL");return ok?0:1;}
+        if([args containsObject:@"--self-check"]){BOOL ok=TXRunSelfCheck() && TXRunMIDISelfCheck() && TXRunBrowserSelfCheck() && TXRunUIModelSelfCheck() && TXRunDeviceContextSelfCheck() && TXRunLocalizationSelfCheck() && TXRunSceneStoreSelfCheck() && [TXApp halSelfCheck];printf("TX6Mac DSP/render self-check: %s\n",ok?"PASS":"FAIL");return ok?0:1;}
         if([args containsObject:@"--diagnose"]){NSData *json=[NSJSONSerialization dataWithJSONObject:TXAudio.diagnostics options:NSJSONWritingPrettyPrinted error:nil];fwrite(json.bytes,1,json.length,stdout);puts("");return 0;}
         for(NSRunningApplication *running in [NSRunningApplication runningApplicationsWithBundleIdentifier:NSBundle.mainBundle.bundleIdentifier])if(running.processIdentifier!=NSProcessInfo.processInfo.processIdentifier){[running activateWithOptions:NSApplicationActivateAllWindows];return 0;}
         NSApplication *app=NSApplication.sharedApplication;[app setActivationPolicy:NSApplicationActivationPolicyRegular];__attribute__((objc_precise_lifetime)) TXApp *delegate=[TXApp new];app.delegate=delegate;[app run];

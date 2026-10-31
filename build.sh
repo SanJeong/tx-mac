@@ -66,7 +66,7 @@ PLIST
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
 xcrun clang -fobjc-arc -fmodules -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=26.0 \
-  Sources/Audio.m Sources/MIDI.m Sources/BrowserBridge.m Sources/Localization.m Sources/USBLevelDiagnostic.m Sources/App.m \
+  Sources/Audio.m Sources/MIDI.m Sources/BrowserBridge.m Sources/Localization.m Sources/Scenes.m Sources/USBLevelDiagnostic.m Sources/App.m \
   -framework Cocoa -framework CoreAudio -framework CoreMIDI -framework CoreAudioKit -framework CoreBluetooth -framework AVFoundation -framework AudioUnit \
   -o "$APP/Contents/MacOS/TX6Mac"
 xcrun clang -fobjc-arc -fmodules -std=gnu11 -O2 -Wall -Wextra -mmacosx-version-min=26.0 Sources/BrowserHost.m -framework Foundation -o "$APP/Contents/MacOS/TX6BrowserHost"
