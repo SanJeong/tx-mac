@@ -12,8 +12,8 @@ if [[ -z "${SIGN_IDENTITY+x}" ]]; then
     END { if (developer_id) print developer_id; else if (development) print development; else print "-" }
   ')"
 fi
-APP_VERSION="${APP_VERSION:-1.0.1}"
-BUILD_NUMBER="${BUILD_NUMBER:-5}"
+APP_VERSION="${APP_VERSION:-1.1.0}"
+BUILD_NUMBER="${BUILD_NUMBER:-6}"
 fail() { print -u2 -- "$*"; exit 1; }
 [[ "$DEST" == *.app ]] || fail 'Build destination must end in .app.'
 [[ ! -L "$DEST" ]] || fail 'Refusing to replace a symlink.'
@@ -52,12 +52,13 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleDevelopmentRegion</key><string>en</string>
 <key>CFBundleLocalizations</key><array><string>en</string><string>ko</string><string>ja</string></array>
-<key>CFBundleShortVersionString</key><string>1.0.1</string>
-<key>CFBundleVersion</key><string>5</string>
+<key>CFBundleShortVersionString</key><string>1.1.0</string>
+<key>CFBundleVersion</key><string>6</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>LSMultipleInstancesProhibited</key><true/>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAudioCaptureUsageDescription</key><string>TX6Mac processes system audio locally so TX-6 controls can adjust each app’s volume and EQ. Audio is not saved or uploaded.</string>
+<key>NSMicrophoneUsageDescription</key><string>The optional USB level diagnostic reads only the TX-6 USB main-mix return to measure signal levels. It does not play, save, or upload audio. Normal mixer use does not request microphone access.</string>
 <key>NSBluetoothAlwaysUsageDescription</key><string>TX6Mac connects to TX-6 over Bluetooth MIDI to receive fader, knob, and button controls.</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
@@ -65,8 +66,8 @@ PLIST
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
 xcrun clang -fobjc-arc -fmodules -std=gnu11 -O2 -Wall -Wextra -Wno-unused-parameter -mmacosx-version-min=26.0 \
-  Sources/Audio.m Sources/MIDI.m Sources/BrowserBridge.m Sources/Localization.m Sources/App.m \
-  -framework Cocoa -framework CoreAudio -framework CoreMIDI -framework CoreAudioKit -framework CoreBluetooth \
+  Sources/Audio.m Sources/MIDI.m Sources/BrowserBridge.m Sources/Localization.m Sources/USBLevelDiagnostic.m Sources/App.m \
+  -framework Cocoa -framework CoreAudio -framework CoreMIDI -framework CoreAudioKit -framework CoreBluetooth -framework AVFoundation -framework AudioUnit \
   -o "$APP/Contents/MacOS/TX6Mac"
 xcrun clang -fobjc-arc -fmodules -std=gnu11 -O2 -Wall -Wextra -mmacosx-version-min=26.0 Sources/BrowserHost.m -framework Foundation -o "$APP/Contents/MacOS/TX6BrowserHost"
 ditto --norsrc --noextattr LICENSE "$APP/Contents/Resources/LICENSE"

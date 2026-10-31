@@ -1,2 +1,3 @@
 "NSAudioCaptureUsageDescription" = "TX6Mac accesses audio playing on your Mac to adjust volume and EQ per app. Audio is not recorded or transmitted.";
 "NSBluetoothAlwaysUsageDescription" = "TX6Mac connects to TX-6 over Bluetooth MIDI to control volume and EQ.";
+"NSMicrophoneUsageDescription" = "The optional USB level diagnostic reads only the TX-6 USB main-mix return to measure signal levels. It does not play, save, or upload audio. Normal mixer use does not request microphone access.";

@@ -154,3 +154,12 @@
 "오디오 연결 해제 중 · 원래 재생을 복구하고 있습니다." = "Disconnecting audio · restoring original playback.";
 
 "시스템 기본 출력" = "System Default Output";
+"TX-6 USB 채널 미터" = "TX-6 USB channel meters";
+"선택 기능 · USB 12 IN / 12 CH 모드가 필요합니다." = "Optional · requires USB 12 IN / 12 CH mode.";
+"Chrome 탭별 모드에서는 대기 · 맥 믹서는 계속 동작합니다." = "Unavailable in Chrome tab mode · Mac mixing continues.";
+"TX-6 자체 출력에서는 미지원 · 맥 믹서는 계속 동작합니다." = "Unavailable with TX-6 as main output · Mac mixing continues.";
+"TX-6 USB 12 IN / 12 CH 연결 대기 · Bluetooth만으로는 지원하지 않습니다." = "Waiting for one TX-6 USB 12 IN / 12 CH device · Bluetooth alone is unsupported.";
+"USB 미터 연결 실패 · 맥 믹서는 계속 동작합니다." = "USB meters could not connect · Mac mixing continues.";
+"USB 채널 미터 연결 · CH 01–06 앱 오디오 전송 중" = "USB meters connected · sending CH 01–06 app audio";
+"USB 미터 준비 · 믹서를 시작하면 채널 오디오를 전송합니다." = "USB meters ready · start mixing to send channel audio.";
+"USB 미터 연결 실패 · 믹서 오디오 상태를 확인하세요." = "USB meters could not connect · check the mixer audio status.";

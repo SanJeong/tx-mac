@@ -11,6 +11,9 @@ typedef struct {
     _Atomic(float) gain[TX_SLOTS], eq[TX_SLOTS][TX_EQ], master;
     _Atomic(bool) muted[TX_SLOTS], masterMuted;
     _Atomic(float) peak[TX_SLOTS], outputPeak;
+    _Atomic(float) usbPeak[6], usbRMS[6];
+    _Atomic(bool) meterReference;
+    uint64_t meterReferenceFrame;
     _Atomic(uint64_t) callbacks, frames, limitedFrames;
     _Atomic(int) layoutFault;
     float smoothGain[TX_SLOTS], smoothMaster, limiterGain;
@@ -19,6 +22,9 @@ typedef struct {
     _Atomic(double) sampleRate;
     _Atomic(UInt32) physicalInputChannels;
     UInt32 outputLeft, outputRight;
+    // Immutable while the IOProc runs; configured only by the serial HAL worker.
+    BOOL meterEnabled;
+    UInt32 meterOutputOffset;
     int tapSlots[TX_SLOTS];
     _Atomic(int) tapCount;
 } TXRenderState;
@@ -28,6 +34,8 @@ typedef struct {
 @property(nonatomic,readonly) BOOL running;
 @property(atomic,copy) NSString *lastError;
 @property(nonatomic,readonly) AudioDeviceID device;
+@property(nonatomic) AudioDeviceID meterOutputDevice;
+@property(nonatomic,readonly) BOOL metering;
 // HAL lifecycle and discovery are synchronous; call only on the app's serial HAL queue.
 - (BOOL)startOnDevice:(AudioDeviceID)device groups:(NSArray<NSArray<NSNumber*>*>*)groups;
 - (void)stop;
@@ -50,4 +58,7 @@ typedef struct {
 @end
 
 BOOL TXRunSelfCheck(void);
+int TXCheckUSBMeterRoute(BOOL direct);
+int TXMeasureUSBReturn(BOOL requestMicrophone);
 BOOL TXRunMIDISelfCheck(void);
+void TXPrintBLEServices(BOOL requestAccess,BOOL observe,NSUInteger pingTarget);

@@ -1,6 +1,173 @@
 #import "TX6.h"
 #import <CoreBluetooth/CoreBluetooth.h>
 
+static BOOL TXBLEInspectorName(NSString *name) {
+    return name && ([name caseInsensitiveCompare:@"TX-6"]==NSOrderedSame || [name caseInsensitiveCompare:@"TX6"]==NSOrderedSame);
+}
+// Keep BLE diagnostics separate from the mixer's connection.
+@interface TXBLEServiceInspector : NSObject<CBCentralManagerDelegate,CBPeripheralDelegate>
+@property(nonatomic,strong) CBCentralManager *central;
+@property(nonatomic,strong) CBPeripheral *peripheral;
+@property(nonatomic,strong) NSMutableArray<NSMutableDictionary*> *services;
+@property(nonatomic,strong) NSMutableDictionary<NSValue*,NSMutableDictionary*> *rows;
+@property(nonatomic,copy) NSString *result;
+@property(nonatomic) BOOL started,done,ownsConnection;
+@property(nonatomic) NSUInteger pending;
+@property(nonatomic) BOOL observe;
+@property(nonatomic,strong) CBCharacteristic *observedCharacteristic;
+@property(nonatomic,strong) NSMutableArray *samples;
+@property(nonatomic) NSUInteger packetCount,byteCount;
+@property(nonatomic) NSTimeInterval observeUntil;
+@property(nonatomic,strong) NSMutableDictionary *deviceInfo;
+@property(nonatomic,strong) CBCharacteristic *midiCharacteristic;
+@property(nonatomic,strong) NSMutableArray *midiSamples,*events;
+@property(nonatomic) NSUInteger midiPackets,midiBytes;
+@property(nonatomic) NSTimeInterval startTime;
+@property(nonatomic) BOOL privateSubscribed,midiSubscribed;
+@property(nonatomic) BOOL pingRequested,pingAttempted,pingSubmitted;
+@property(nonatomic) BOOL pingRadio;
+@end
+
+@implementation TXBLEServiceInspector
+- (instancetype)init {
+    if((self=[super init])){_services=[NSMutableArray new];_rows=[NSMutableDictionary new];_samples=[NSMutableArray new];_midiSamples=[NSMutableArray new];_events=[NSMutableArray new];_deviceInfo=[NSMutableDictionary new];_startTime=NSProcessInfo.processInfo.systemUptime;_result=@"pending";}return self;
+}
+- (void)record:(NSString*)event error:(NSError*)error {
+    NSMutableDictionary *entry=[@{@"event":event,@"ms":@((NSProcessInfo.processInfo.systemUptime-self.startTime)*1000)} mutableCopy];
+    if(error){entry[@"domain"]=error.domain;entry[@"code"]=@(error.code);entry[@"description"]=error.localizedDescription;}
+    if(self.events.count<80)[self.events addObject:entry];
+    fprintf(stderr,"TX-6 BLE %.0f ms: %s\n",[entry[@"ms"] doubleValue],event.UTF8String);
+}
+- (void)submitPingIfReady {
+    if(!self.pingRequested||self.pingAttempted||!self.privateSubscribed||!self.midiSubscribed||self.done)return;
+    self.pingAttempted=YES;
+    if(self.peripheral.state!=CBPeripheralStateConnected||!self.observedCharacteristic.isNotifying||!self.midiCharacteristic.isNotifying||!(self.observedCharacteristic.properties&CBCharacteristicPropertyWriteWithoutResponse)||!self.peripheral.canSendWriteWithoutResponse){[self record:@"ping-not-submitted" error:nil];[self finish:@"ping-write-unavailable"];return;}
+    // One fixed candidate ping; never send configuration or update commands.
+    const UInt8 frame[]={0x02,0x61,0x08,0x01,0x04,0x54,0x58,0x36,0x4d,0x67,0x00};
+    const UInt8 radio[]={0x02,0x63,0x08,0x01,0x04,0x54,0x58,0x36,0x4d,0x1f,0x00};
+    if([self.peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse]<sizeof(frame)){[self finish:@"ping-exceeds-mtu"];return;}
+    [self.peripheral writeValue:[NSData dataWithBytes:self.pingRadio?radio:frame length:sizeof(frame)] forCharacteristic:self.observedCharacteristic type:CBCharacteristicWriteWithoutResponse];self.pingSubmitted=YES;
+    [self record:@"candidate-ping-submitted" error:nil];
+}
+- (void)finish:(NSString*)result {if(self.done)return;self.result=result;self.done=YES;}
+- (void)inspect:(CBPeripheral*)peripheral {
+    if(self.done||self.peripheral)return;
+    self.peripheral=peripheral;peripheral.delegate=self;
+    [self.central stopScan];self.ownsConnection=YES;
+    [self record:@"connect-requested" error:nil];
+    [self.central connectPeripheral:peripheral options:nil];
+}
+- (void)centralManagerDidUpdateState:(CBCentralManager*)central {
+    if(self.done)return;
+    if(CBManager.authorization==CBManagerAuthorizationNotDetermined)return;
+    if(CBManager.authorization!=CBManagerAuthorizationAllowedAlways){[self finish:@"authorization-unavailable"];return;}
+    if(central.state==CBManagerStateUnknown||central.state==CBManagerStateResetting)return;
+    if(central.state!=CBManagerStatePoweredOn){[self finish:@"bluetooth-unavailable"];return;}
+    if(self.started)return;self.started=YES;
+    CBUUID *midi=[CBUUID UUIDWithString:@"03B80E5A-EDE8-4B33-A751-6CE34EC4C700"];
+    for(CBPeripheral *p in [central retrieveConnectedPeripheralsWithServices:@[midi]])if(TXBLEInspectorName(p.name)){[self inspect:p];return;}
+    NSString *saved=[NSUserDefaults.standardUserDefaults stringForKey:@"TX6Mac.BLEPeripheral"];
+    NSUUID *identifier=saved.length?[[NSUUID alloc] initWithUUIDString:saved]:nil;
+    if(identifier)for(CBPeripheral *p in [central retrievePeripheralsWithIdentifiers:@[identifier]])if(TXBLEInspectorName(p.name)){[self inspect:p];return;}
+    [central scanForPeripheralsWithServices:nil options:nil];
+}
+- (void)centralManager:(CBCentralManager*)central didDiscoverPeripheral:(CBPeripheral*)peripheral advertisementData:(NSDictionary<NSString*,id>*)advertisementData RSSI:(NSNumber*)RSSI {
+    NSString *name=advertisementData[CBAdvertisementDataLocalNameKey];
+    if(TXBLEInspectorName(peripheral.name)||([name isKindOfClass:NSString.class]&&TXBLEInspectorName(name)))[self inspect:peripheral];
+}
+- (void)centralManager:(CBCentralManager*)central didConnectPeripheral:(CBPeripheral*)peripheral {
+    if(!self.done&&peripheral==self.peripheral){[self record:@"connected" error:nil];[peripheral discoverServices:nil];}
+}
+- (void)centralManager:(CBCentralManager*)central didFailToConnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
+    if(peripheral==self.peripheral){[self record:@"connect-failed" error:error];[self finish:error.localizedDescription?:@"connection-failed"];}
+}
+- (void)centralManager:(CBCentralManager*)central didDisconnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
+    if(peripheral==self.peripheral){[self record:@"disconnected" error:error];[self finish:error.localizedDescription?:@"disconnected"];}
+}
+- (void)peripheral:(CBPeripheral*)peripheral didDiscoverServices:(NSError*)error {
+    if(self.done||peripheral!=self.peripheral)return;
+    if(error){[self finish:error.localizedDescription];return;}
+    self.pending=peripheral.services.count;
+    if(!self.pending){[self finish:@"complete"];return;}
+    for(CBService *service in peripheral.services){
+        NSMutableDictionary *row=[@{@"uuid":service.UUID.UUIDString,@"primary":@(service.isPrimary),@"characteristics":[NSMutableArray new]} mutableCopy];
+        [self.services addObject:row];self.rows[[NSValue valueWithNonretainedObject:service]]=row;
+        [peripheral discoverCharacteristics:nil forService:service];
+    }
+}
+- (void)peripheral:(CBPeripheral*)peripheral didDiscoverCharacteristicsForService:(CBService*)service error:(NSError*)error {
+    if(self.done||peripheral!=self.peripheral)return;
+    NSValue *key=[NSValue valueWithNonretainedObject:service];NSMutableDictionary *row=self.rows[key];
+    if(!row)return;[self.rows removeObjectForKey:key];
+    if(error)row[@"error"]=error.localizedDescription;
+    else for(CBCharacteristic *characteristic in service.characteristics){
+        NSMutableArray *names=[NSMutableArray new];CBCharacteristicProperties properties=characteristic.properties;
+        const CBCharacteristicProperties flags[]={CBCharacteristicPropertyBroadcast,CBCharacteristicPropertyRead,CBCharacteristicPropertyWriteWithoutResponse,CBCharacteristicPropertyWrite,CBCharacteristicPropertyNotify,CBCharacteristicPropertyIndicate,CBCharacteristicPropertyAuthenticatedSignedWrites,CBCharacteristicPropertyExtendedProperties,CBCharacteristicPropertyNotifyEncryptionRequired,CBCharacteristicPropertyIndicateEncryptionRequired};
+        NSArray *labels=@[@"broadcast",@"read",@"writeWithoutResponse",@"write",@"notify",@"indicate",@"authenticatedSignedWrites",@"extendedProperties",@"notifyEncryptionRequired",@"indicateEncryptionRequired"];
+        for(NSUInteger i=0;i<sizeof(flags)/sizeof(flags[0]);i++)if(properties&flags[i])[names addObject:labels[i]];
+        [row[@"characteristics"] addObject:@{@"uuid":characteristic.UUID.UUIDString,@"properties":@(properties),@"propertyNames":names}];
+        if(self.observe&&[service.UUID isEqual:[CBUUID UUIDWithString:@"180A"]]&&([characteristic.UUID isEqual:[CBUUID UUIDWithString:@"2A24"]]||[characteristic.UUID isEqual:[CBUUID UUIDWithString:@"2A26"]]||[characteristic.UUID isEqual:[CBUUID UUIDWithString:@"2A29"]])&&(properties&CBCharacteristicPropertyRead))[peripheral readValueForCharacteristic:characteristic];
+        if(self.observe&&[service.UUID isEqual:[CBUUID UUIDWithString:@"10A6E10A-6E00-4DE3-ABBA-DABBAD000000"]]&&[characteristic.UUID isEqual:[CBUUID UUIDWithString:@"C1832AEB-6409-4B97-9575-208525A8213B"]]&&(properties&CBCharacteristicPropertyNotify)){
+            self.observedCharacteristic=characteristic;[peripheral setNotifyValue:YES forCharacteristic:characteristic];
+        }
+        if(self.observe&&[service.UUID isEqual:[CBUUID UUIDWithString:@"03B80E5A-EDE8-4B33-A751-6CE34EC4C700"]]&&[characteristic.UUID isEqual:[CBUUID UUIDWithString:@"7772E5DB-3868-4112-A1A9-F2669D106BF3"]]&&(properties&CBCharacteristicPropertyNotify)){
+            self.midiCharacteristic=characteristic;[peripheral setNotifyValue:YES forCharacteristic:characteristic];
+        }
+    }
+    if(self.pending)self.pending--;if(!self.pending&&(!self.observe||!self.observedCharacteristic))[self finish:self.observe?@"notification-characteristic-not-found":@"complete"];
+}
+- (void)peripheral:(CBPeripheral*)peripheral didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic error:(NSError*)error {
+    if(self.done||peripheral!=self.peripheral)return;
+    if(characteristic==self.midiCharacteristic){self.midiSubscribed=characteristic.isNotifying&&!error;[self record:self.midiSubscribed?@"midi-subscribed":@"midi-subscription-failed" error:error];[self submitPingIfReady];return;}
+    if(characteristic!=self.observedCharacteristic)return;
+    if(error||!characteristic.isNotifying)[self finish:error.localizedDescription?:@"notification-unavailable"];
+    else {
+        self.privateSubscribed=YES;[self record:@"private-subscribed" error:nil];
+        [self submitPingIfReady];
+        if(self.observeUntil)return;self.observeUntil=NSProcessInfo.processInfo.systemUptime+40;
+    }
+}
+- (void)peripheral:(CBPeripheral*)peripheral didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError*)error {
+    if(self.done||peripheral!=self.peripheral||error)return;
+    if([characteristic.service.UUID isEqual:[CBUUID UUIDWithString:@"180A"]]){NSString *value=[[NSString alloc] initWithData:characteristic.value encoding:NSUTF8StringEncoding];if(value)self.deviceInfo[characteristic.UUID.UUIDString]=value;return;}
+    BOOL midi=characteristic==self.midiCharacteristic;if(!midi&&characteristic!=self.observedCharacteristic)return;
+    NSData *data=characteristic.value;if(!data)return;
+    if(midi){self.midiPackets++;self.midiBytes+=data.length;}else{self.packetCount++;self.byteCount+=data.length;}
+    NSMutableArray *samples=midi?self.midiSamples:self.samples;
+    if(samples.count<8){NSMutableString *hex=[NSMutableString new];const UInt8 *bytes=data.bytes;for(NSUInteger i=0;i<MIN(data.length,96);i++)[hex appendFormat:@"%02X",bytes[i]];
+        [samples addObject:@{@"ms":@((NSProcessInfo.processInfo.systemUptime-self.startTime)*1000),@"length":@(data.length),@"hex":hex}];}
+}
+@end
+
+void TXPrintBLEServices(BOOL requestAccess,BOOL observe,NSUInteger pingTarget) {
+    @autoreleasepool {
+        CBManagerAuthorization authorization=CBManager.authorization;
+        NSMutableDictionary *output=[@{@"authorization":@(authorization),@"services":@[]} mutableCopy];
+        if(authorization!=CBManagerAuthorizationAllowedAlways&&!(requestAccess&&authorization==CBManagerAuthorizationNotDetermined))output[@"result"]=@"authorization-not-granted";
+        else {
+            TXBLEServiceInspector *inspector=[TXBLEServiceInspector new];
+            inspector.observe=observe;inspector.pingRequested=pingTarget==1||pingTarget==3;inspector.pingRadio=pingTarget==3;
+            inspector.central=[[CBCentralManager alloc] initWithDelegate:inspector queue:dispatch_get_main_queue() options:@{CBCentralManagerOptionShowPowerAlertKey:@NO}];
+            NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+(requestAccess?120:(observe?70:20));
+            while(!inspector.done&&NSProcessInfo.processInfo.systemUptime<deadline){[NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+                if(inspector.observeUntil&&NSProcessInfo.processInfo.systemUptime>=inspector.observeUntil)[inspector finish:@"observed"];}
+            if(!inspector.done)[inspector finish:@"timeout"];
+            output[@"result"]=inspector.result;output[@"centralState"]=@(inspector.central.state);output[@"services"]=inspector.services;
+            output[@"authorization"]=@(CBManager.authorization);
+            output[@"events"]=inspector.events;
+            output[@"pingAttempted"]=@(inspector.pingAttempted);output[@"pingSubmitted"]=@(inspector.pingSubmitted);
+            output[@"pingTarget"]=@(pingTarget);
+            if(observe){output[@"packets"]=@(inspector.packetCount);output[@"bytes"]=@(inspector.byteCount);output[@"samples"]=inspector.samples;output[@"deviceInfo"]=inspector.deviceInfo;output[@"subscribed"]=@(inspector.privateSubscribed);output[@"midiSubscribed"]=@(inspector.midiSubscribed);output[@"midiPackets"]=@(inspector.midiPackets);output[@"midiBytes"]=@(inspector.midiBytes);output[@"midiSamples"]=inspector.midiSamples;}
+            if(inspector.peripheral){output[@"peripheralUUID"]=inspector.peripheral.identifier.UUIDString;output[@"name"]=inspector.peripheral.name?:@"";}
+            [inspector.central stopScan];inspector.peripheral.delegate=nil;
+            if(inspector.ownsConnection)[inspector.central cancelPeripheralConnection:inspector.peripheral];
+            inspector.central.delegate=nil;
+        }
+        NSData *json=[NSJSONSerialization dataWithJSONObject:output options:NSJSONWritingPrettyPrinted error:nil];
+        if(json)fwrite(json.bytes,1,json.length,stdout);puts("");
+    }
+}
+
 static NSString *MIDIString(MIDIObjectRef object,CFStringRef property) {
     CFStringRef s=NULL;if(MIDIObjectGetStringProperty(object,property,&s)!=noErr||!s)return @"";return CFBridgingRelease(s);
 }

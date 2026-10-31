@@ -1,2 +1,3 @@
 "NSAudioCaptureUsageDescription" = "앱별 음량과 EQ를 조절하기 위해 Mac에서 재생하는 오디오에 접근합니다. 오디오는 녹음하거나 외부로 전송하지 않습니다.";
 "NSBluetoothAlwaysUsageDescription" = "TX-6와 Bluetooth MIDI로 연결하여 음량과 EQ를 조절합니다.";
+"NSMicrophoneUsageDescription" = "선택 실행하는 USB 레벨 진단에서 TX-6의 USB 메인 믹스 반환 신호만 읽어 레벨을 측정합니다. 오디오를 재생·저장·외부 전송하지 않습니다. 일반 믹서 사용에서는 마이크 접근을 요청하지 않습니다.";
