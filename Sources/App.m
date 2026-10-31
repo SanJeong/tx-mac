@@ -7,6 +7,7 @@
 #import <CommonCrypto/CommonDigest.h>
 
 static const double TXVolumeStep=1.0/99.0;
+static const NSUInteger TXSceneMIDILimit=4096;
 static NSInteger TXVolumeValue(double gain) {return (NSInteger)llround((isfinite(gain)?fmax(0,fmin(1,gain)):0)*99);}
 static NSString *TXVolumeText(double gain) {return [NSString stringWithFormat:@"%ld",(long)TXVolumeValue(gain)];}
 static double TXVolumeGain(NSInteger value) {return fmax(0,fmin(99,value))/99.0;}
@@ -463,11 +464,13 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 @interface TXSceneCheckGuard:TXAudioMuteGuard
 @property(nonatomic,strong) TXSceneCheckAudio *audio;
 @property(nonatomic) BOOL held,failBegin,failEnd,wrongRelease;
+@property(atomic) BOOL ending;
+@property(nonatomic,strong) dispatch_semaphore_t endGate;
 @end
 @implementation TXSceneCheckGuard
 - (BOOL)active {return _held;}
 - (BOOL)begin:(NSError**)error {[_audio.events addObject:@"begin"];if(_failBegin){if(error)*error=[NSError errorWithDomain:@"fixture" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Simulated begin failure"}];return NO;}_held=YES;return YES;}
-- (BOOL)end:(NSError**)error {[_audio.events addObject:@"end"];if(_failEnd){if(error)*error=[NSError errorWithDomain:@"fixture" code:2 userInfo:@{NSLocalizedDescriptionKey:@"Simulated end failure"}];return NO;}_held=NO;return YES;}
+- (BOOL)end:(NSError**)error {[_audio.events addObject:@"end"];if(_endGate){self.ending=YES;dispatch_semaphore_wait(_endGate,DISPATCH_TIME_FOREVER);self.ending=NO;}if(_failEnd){if(error)*error=[NSError errorWithDomain:@"fixture" code:2 userInfo:@{NSLocalizedDescriptionKey:@"Simulated end failure"}];return NO;}_held=NO;return YES;}
 @end
 
 @interface TXApp:NSObject<NSApplicationDelegate,NSWindowDelegate,NSMenuDelegate,NSPopoverDelegate,NSTextFieldDelegate>
@@ -478,9 +481,10 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 @end
 @interface TXSceneCheckApp:TXApp
 @property(nonatomic,strong) TXSceneCheckDefaults *memoryDefaults;
+@property(nonatomic) BOOL quitWaitRequested;
 @end
 @implementation TXApp {
-    TXSceneStore *_sceneStore;NSPopUpButton *_sceneMenu;NSString *_selectedSceneID;NSMutableIndexSet *_sceneReservations;NSMutableArray *_pendingSources,*_sceneMIDI;NSDictionary *_sceneUndo,*_sceneBaseline,*_sceneRollbackRequest;BOOL _sceneApplying,_sceneProtected,_sceneOutputPinned,_sceneModelCommitted,_sceneStopping,_sceneQuitting;TXAudioMuteGuard *_sceneGuard;_Atomic(NSUInteger) _sceneGeneration;NSAlert *_sceneAlert;NSTextField *_sceneNameInput,*_sceneNameError;BOOL _sceneRenaming;
+    TXSceneStore *_sceneStore;NSPopUpButton *_sceneMenu;NSString *_selectedSceneID;NSMutableIndexSet *_sceneReservations;NSMutableArray *_pendingSources,*_sceneMIDI;NSDictionary *_sceneUndo,*_sceneBaseline,*_sceneRollbackRequest;BOOL _sceneApplying,_sceneProtected,_sceneOutputPinned,_sceneModelCommitted,_sceneStopping,_sceneQuitting,_sceneReplayingMIDI,_sceneMIDIOverflow;TXAudioMuteGuard *_sceneGuard;_Atomic(NSUInteger) _sceneGeneration;NSAlert *_sceneAlert;NSTextField *_sceneNameInput,*_sceneNameError;BOOL _sceneRenaming;
     TXAudio *_audio;TXMIDI *_midi;TXBrowserBridge *_browser;NSDate *_lastBrowserSend;NSTextField *_browserLabel;NSWindow *_window;TXCanvas *_canvas;NSStatusItem *_statusItem;
     NSMenu *_statusMenu;CABTLEMIDIWindowController *_bluetooth;
     NSPopUpButton *_outputMenu,*_monitorMenu,*_transportMenu,*_languageMenu;NSSlider *_monitorSlider;NSTextField *_monitorLevelLabel;NSWindow *_setupWindow;NSTextField *_setupDevice,*_setupAudio;NSButton *_setupStart;BOOL _sleepResume,_sleeping,_autoStart,_explicitStop,_retryExhausted,_audioStartConsent;NSUInteger _retryAttempt;NSDate *_retryAt,*_lastStatusWrite;NSButton *_autoStartButton;NSButton *_startButton,*_pickupButton,*_invertButton,*_masterMute,*_soundKey,*_autoButton,*_hudButton;TXHUDPanel *_hud;TXHUDView *_hudView;NSTimer *_hudDismiss;NSDictionary *_pendingHUD;BOOL _hudEnabled,_statusMenuTracking;NSPopover *_settingsPopover;TXDeviceContext _deviceContext;NSTextField *_deviceContextLabel,*_calibrationInput;NSButton *_resumeDeviceButton;
@@ -576,10 +580,10 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     NSMenu *menu=[NSMenu new];menu.autoenablesItems=NO;NSDictionary *selected=[_sceneStore sceneWithID:_selectedSceneID];BOOL dirty=[self sceneDirty];
     NSString *title=selected?[selected[@"name"] stringByAppendingString:dirty?@" •":@""]:TXL(@"저장하지 않은 믹스");if(_sceneApplying)title=[title stringByAppendingFormat:@" · %@",TXL(@"적용 중")];
     NSMenuItem *current=[[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];current.enabled=NO;current.toolTip=selected[@"name"]?:title;[menu addItem:current];[menu addItem:NSMenuItem.separatorItem];
-    for(NSDictionary *entry in _sceneStore.scenes){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[@"name"] action:@selector(sceneSelected:) keyEquivalent:@""];item.target=self;item.representedObject=entry[@"id"];item.state=[entry[@"id"] isEqual:_selectedSceneID]?NSControlStateValueOn:NSControlStateValueOff;item.toolTip=entry[@"name"];[menu addItem:item];}
+    for(NSDictionary *entry in _sceneStore.scenes){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[@"name"] action:@selector(sceneSelected:) keyEquivalent:@""];item.target=self;item.representedObject=entry[@"id"];item.state=[entry[@"id"] isEqual:_selectedSceneID]?NSControlStateValueOn:NSControlStateValueOff;item.toolTip=entry[@"name"];item.enabled=!_sceneStopping&&!_sceneQuitting;[menu addItem:item];}
     [menu addItem:NSMenuItem.separatorItem];
     NSArray *commands=@[@[TXL(@"새 이름으로 저장…"),NSStringFromSelector(@selector(sceneSaveAs:))],@[TXL(@"선택한 씬 덮어쓰기"),NSStringFromSelector(@selector(sceneOverwrite:))],@[TXL(@"이름 변경…"),NSStringFromSelector(@selector(sceneRename:))],@[TXL(@"씬 삭제"),NSStringFromSelector(@selector(sceneDelete:))],@[TXL(@"씬 작업 실행 취소"),NSStringFromSelector(@selector(sceneUndo:))]];
-    for(NSUInteger i=0;i<commands.count;i++){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:commands[i][0] action:NSSelectorFromString(commands[i][1]) keyEquivalent:@""];item.target=self;item.enabled=!_sceneApplying&&!_sceneStore.readOnly&&(i==0?_sceneStore.scenes.count<16:i==4?_sceneUndo!=nil:selected!=nil);[menu addItem:item];}
+    for(NSUInteger i=0;i<commands.count;i++){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:commands[i][0] action:NSSelectorFromString(commands[i][1]) keyEquivalent:@""];item.target=self;item.enabled=!_sceneApplying&&!_sceneStopping&&!_sceneQuitting&&!_sceneStore.readOnly&&(i==0?_sceneStore.scenes.count<16:i==4?_sceneUndo!=nil:selected!=nil);[menu addItem:item];}
     if(_sceneStore.readOnly){NSMenuItem *error=[[NSMenuItem alloc] initWithTitle:TXL(@"씬 저장소를 읽을 수 없습니다. 현재 믹서는 계속 사용할 수 있습니다.") action:nil keyEquivalent:@""];error.enabled=NO;[menu addItem:error];}return menu;
 }
 - (void)refreshSceneMenu {
@@ -587,13 +591,13 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 }
 - (void)sceneSelected:(NSMenuItem*)sender {NSDictionary *entry=[_sceneStore sceneWithID:sender.representedObject];if(entry)[self recallSnapshot:entry[@"snapshot"] sceneID:entry[@"id"] recordUndo:YES];}
 - (BOOL)saveSceneName:(NSString*)name rename:(BOOL)rename error:(NSError**)error {
-    if(_sceneApplying)return NO;NSDictionary *before=[_sceneStore sceneWithID:_selectedSceneID];
+    if(_sceneApplying||_sceneStopping||_sceneQuitting)return NO;NSDictionary *before=[_sceneStore sceneWithID:_selectedSceneID];
     if(rename){if(![_sceneStore renameSceneID:_selectedSceneID name:name error:error])return NO;_sceneUndo=@{@"kind":@"rename",@"entry":before};}
     else{NSDictionary *entry=[_sceneStore addSceneNamed:name snapshot:[self sceneSnapshot] error:error];if(!entry)return NO;_sceneUndo=@{@"kind":@"add",@"id":entry[@"id"],@"selected":_selectedSceneID?:@""};_selectedSceneID=entry[@"id"];}
     [self saveSettings];[self refreshSceneMenu];return YES;
 }
 - (void)showSceneName:(BOOL)rename {
-    if(_sceneAlert||_sceneApplying||_sceneStore.readOnly)return;_sceneRenaming=rename;_sceneAlert=[NSAlert new];_sceneAlert.messageText=rename?TXL(@"이름 변경…"):TXL(@"새 이름으로 저장…");[_sceneAlert addButtonWithTitle:TXL(@"저장")];[_sceneAlert addButtonWithTitle:TXL(@"취소")];
+    if(_sceneAlert||_sceneApplying||_sceneStopping||_sceneQuitting||_sceneStore.readOnly)return;_sceneRenaming=rename;_sceneAlert=[NSAlert new];_sceneAlert.messageText=rename?TXL(@"이름 변경…"):TXL(@"새 이름으로 저장…");[_sceneAlert addButtonWithTitle:TXL(@"저장")];[_sceneAlert addButtonWithTitle:TXL(@"취소")];
     NSView *view=[[NSView alloc] initWithFrame:NSMakeRect(0,0,340,72)];_sceneNameInput=[[NSTextField alloc] initWithFrame:NSMakeRect(0,40,340,26)];_sceneNameInput.stringValue=rename?([_sceneStore sceneWithID:_selectedSceneID][@"name"]?:@""):@"";_sceneNameInput.delegate=self;_sceneNameInput.accessibilityLabel=TXL(@"씬 이름");[view addSubview:_sceneNameInput];_sceneNameError=Label(@"",NSMakeRect(0,0,340,34),11,NO);_sceneNameError.textColor=NSColor.systemRedColor;_sceneNameError.maximumNumberOfLines=2;[view addSubview:_sceneNameError];_sceneAlert.accessoryView=view;
     NSButton *save=_sceneAlert.buttons.firstObject;save.target=self;save.action=@selector(confirmSceneName:);[_sceneAlert beginSheetModalForWindow:_window completionHandler:^(NSModalResponse response){self->_sceneAlert=nil;self->_sceneNameInput=nil;self->_sceneNameError=nil;[self refreshSceneMenu];}];[_sceneAlert.window makeFirstResponder:_sceneNameInput];
 }
@@ -601,10 +605,10 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (void)controlTextDidChange:(NSNotification*)notification {if(notification.object==_sceneNameInput)_sceneNameError.stringValue=@"";}
 - (void)sceneSaveAs:(id)sender {[self showSceneName:NO];}
 - (void)sceneRename:(id)sender {[self showSceneName:YES];}
-- (void)sceneOverwrite:(id)sender {if(_sceneApplying||_sceneStopping)return;NSDictionary *before=[_sceneStore sceneWithID:_selectedSceneID];NSError *error=nil;if([_sceneStore updateSceneID:_selectedSceneID snapshot:[self sceneSnapshot] error:&error])_sceneUndo=@{@"kind":@"overwrite",@"entry":before};else _canvas.message=[self sceneErrorText:error];[self refreshSceneMenu];}
-- (void)sceneDelete:(id)sender {if(_sceneApplying||_sceneStopping)return;NSDictionary *before=[_sceneStore sceneWithID:_selectedSceneID];if(!before)return;NSUInteger index=[_sceneStore.scenes indexOfObject:before];NSError *error=nil;if([_sceneStore removeSceneID:_selectedSceneID error:&error]){_sceneUndo=@{@"kind":@"delete",@"entry":before,@"index":@(index)};_selectedSceneID=nil;[self saveSettings];}else _canvas.message=[self sceneErrorText:error];[self refreshSceneMenu];}
+- (void)sceneOverwrite:(id)sender {if(_sceneApplying||_sceneStopping||_sceneQuitting)return;NSDictionary *before=[_sceneStore sceneWithID:_selectedSceneID];NSError *error=nil;if([_sceneStore updateSceneID:_selectedSceneID snapshot:[self sceneSnapshot] error:&error])_sceneUndo=@{@"kind":@"overwrite",@"entry":before};else _canvas.message=[self sceneErrorText:error];[self refreshSceneMenu];}
+- (void)sceneDelete:(id)sender {if(_sceneApplying||_sceneStopping||_sceneQuitting)return;NSDictionary *before=[_sceneStore sceneWithID:_selectedSceneID];if(!before)return;NSUInteger index=[_sceneStore.scenes indexOfObject:before];NSError *error=nil;if([_sceneStore removeSceneID:_selectedSceneID error:&error]){_sceneUndo=@{@"kind":@"delete",@"entry":before,@"index":@(index)};_selectedSceneID=nil;[self saveSettings];}else _canvas.message=[self sceneErrorText:error];[self refreshSceneMenu];}
 - (void)sceneUndo:(id)sender {
-    if(!_sceneUndo||_sceneApplying)return;NSDictionary *undo=_sceneUndo;NSString *kind=undo[@"kind"];NSError *error=nil;BOOL ok=NO;
+    if(!_sceneUndo||_sceneApplying||_sceneStopping||_sceneQuitting)return;NSDictionary *undo=_sceneUndo;NSString *kind=undo[@"kind"];NSError *error=nil;BOOL ok=NO;
     if([kind isEqual:@"load"]){[self recallSnapshot:undo[@"snapshot"] sceneID:undo[@"selected"] recordUndo:NO runtime:YES];return;}
     if([kind isEqual:@"add"]){ok=[_sceneStore removeSceneID:undo[@"id"] error:&error];if(ok)_selectedSceneID=undo[@"selected"];}
     if([kind isEqual:@"delete"]){ok=[_sceneStore restoreEntry:undo[@"entry"] atIndex:[undo[@"index"] unsignedIntegerValue] error:&error];if(ok)_selectedSceneID=undo[@"entry"][@"id"];}
@@ -631,7 +635,9 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 }
 - (void)recallSnapshot:(NSDictionary*)value sceneID:(NSString*)sceneID recordUndo:(BOOL)recordUndo {[self recallSnapshot:value sceneID:sceneID recordUndo:recordUndo runtime:NO];}
 - (void)recallSnapshot:(NSDictionary*)value sceneID:(NSString*)sceneID recordUndo:(BOOL)recordUndo runtime:(BOOL)runtime {
+    if(_sceneStopping||_sceneQuitting)return;
     NSError *error=nil;NSDictionary *snapshot=[TXSceneStore canonicalSnapshot:value error:&error];if(!snapshot){_canvas.message=[self sceneErrorText:error];return;}
+    if(_sceneMIDIOverflow){[_sceneMIDI removeAllObjects];_sceneMIDIOverflow=NO;}
     if(runtime)snapshot=CFBridgingRelease(CFPropertyListCreateDeepCopy(kCFAllocatorDefault,(__bridge CFPropertyListRef)value,kCFPropertyListImmutable));
     if(!_sceneBaseline||(_sceneApplying&&_sceneModelCommitted)){_sceneBaseline=[self runtimeSceneSnapshot];_sceneRollbackRequest=[self sceneAudioRequest:_sceneBaseline];}
     NSDictionary *undo=recordUndo?@{@"kind":@"load",@"snapshot":_sceneBaseline,@"selected":_selectedSceneID?:@""}:@{};
@@ -666,15 +672,17 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
             if(atomic_load(&self->_sceneGeneration)!=generation){self->_halBusy=NO;[self processHALWork];return;}
             if(acquired)self->_sceneProtected=YES;
             if(acquired&&!rollback){self->_sceneModelCommitted=YES;[self commitSceneModel:request[@"snapshot"] sceneID:request[@"sceneID"]];if([request[@"undo"] count])self->_sceneUndo=request[@"undo"];else if([request[@"clearUndo"] boolValue])self->_sceneUndo=nil;}
+            self->_sceneModelCommitted=YES;
             self->_audioReady=acquired?ready:[request[@"wasReady"] boolValue];self->_monitoring=[result[@"monitoring"] boolValue];self->_usbMetering=[result[@"metering"] boolValue];self->_monitorError=result[@"monitorError"]?:@"";self->_usbMeterError=result[@"meterError"]?:@"";
             self->_audioError=!acquired?[self sceneErrorText:guardError]:(waiting?TXL(@"선택한 출력 장치 연결 대기 · 씬 전환 보호 중"):result[@"error"]?:@"");
-            self->_sceneApplying=NO;NSArray *queued=[self->_sceneMIDI copy];[self->_sceneMIDI removeAllObjects];for(NSDictionary *event in queued)[self handleMIDI:event[@"source"] channel:0 cc:[event[@"cc"] unsignedCharValue] value:[event[@"value"] unsignedCharValue]];
-            self->_sceneApplying=YES;
+            [self drainSceneMIDI];BOOL midiOverflow=self->_sceneMIDIOverflow;
             dispatch_async(self->_halQueue,^{
-                NSError *endError=nil;BOOL validIO=!running||(ready&&atomic_load(&backend.state->callbacks)>0&&!atomic_load(&backend.state->layoutFault));BOOL canRelease=acquired&&validIO&&atomic_load(&self->_sceneGeneration)==generation;BOOL released=!canRelease||[guard end:&endError];BOOL lostReady=acquired&&ready&&!validIO;if(canRelease&&released&&atomic_load(&self->_sceneGeneration)==generation)atomic_store(&backend.state->transitionMuted,false);
+                NSError *endError=nil;BOOL validIO=!running||(ready&&atomic_load(&backend.state->callbacks)>0&&!atomic_load(&backend.state->layoutFault));BOOL canRelease=acquired&&validIO&&!midiOverflow&&atomic_load(&self->_sceneGeneration)==generation;BOOL released=!canRelease||[guard end:&endError];BOOL lostReady=acquired&&ready&&!validIO;
                 dispatch_async(dispatch_get_main_queue(),^{
                     self->_halBusy=NO;self->_halStartedAt=nil;if(atomic_load(&self->_sceneGeneration)!=generation){[self processHALWork];return;}
-                    self->_sceneApplying=NO;self->_isBuilding=NO;self->_sceneBaseline=nil;self->_sceneRollbackRequest=nil;if(!released||lostReady){self->_audioError=[self sceneErrorText:endError];self->_audioReady=NO;}
+                    [self drainSceneMIDI];if(self->_sceneMIDIOverflow)atomic_store(&backend.state->transitionMuted,true);BOOL finalReady=!running||(atomic_load(&backend.state->callbacks)>0&&!atomic_load(&backend.state->layoutFault));
+                    if(canRelease&&released&&!self->_sceneMIDIOverflow&&finalReady)atomic_store(&backend.state->transitionMuted,false);
+                    self->_sceneApplying=NO;self->_isBuilding=NO;self->_sceneBaseline=nil;self->_sceneRollbackRequest=nil;if(!released||lostReady||self->_sceneMIDIOverflow||(ready&&!finalReady)){self->_audioError=[self sceneErrorText:endError];self->_audioReady=NO;}
                     self->_signature=[self currentSignature];self->_startedAt=NSDate.date;self->_progressAt=NSDate.date;self->_progressFrames=0;self->_canvas.message=self->_audioError;self->_outputMenu.enabled=YES;self->_monitorMenu.enabled=YES;self->_monitorSlider.enabled=YES;self->_autoButton.enabled=YES;self->_usbMetersButton.enabled=YES;
                     [self refreshDeviceMenus];[self saveSettings];[self updateStatus];[self writeStatusNow];[self processHALWork];
                 });
@@ -1007,6 +1015,17 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     NSDictionary *beforeStop=[app runtimeSceneSnapshot];NSString *beforeStopID=app->_selectedSceneID;audio.firstStartGate=dispatch_semaphore_create(0);audio.blockStart=audio.starts+1;[app recallSnapshot:target sceneID:desk recordUndo:YES];check(until(^BOOL{return audio.starts==audio.blockStart;}),@"stop test blocks target");NSDictionary *savedDuringRecall=[fixture.memoryDefaults objectForKey:@"TX6Mac.profile"];[app saveSettings];check([[fixture.memoryDefaults objectForKey:@"TX6Mac.profile"] isEqual:savedDuringRecall],@"autosave cannot persist partial scene");app->_desiredRunning=NO;app->_explicitStop=YES;[app stopAudio];dispatch_semaphore_signal(audio.firstStartGate);check(until(done)&&!guard.active&&!atomic_load(&audio.state->transitionMuted)&&[TXSceneStore snapshot:beforeStop equals:[app sceneSnapshot]]&&[app->_selectedSceneID isEqual:beforeStopID],@"stop during recall restores coherent prior profile");
     check([[[fixture.memoryDefaults objectForKey:@"TX6Mac.profile"] objectForKey:@"assignments"] isEqual:app->_assignments],@"committed profile assignments match DSP model");
     TXSceneCheckDefaults *badDefaults=[TXSceneCheckDefaults new];[badDefaults setObject:@{@"version":@99,@"entries":@[]} forKey:@"TX6Mac.scenes"];TXSceneStore *goodStore=app->_sceneStore;app->_sceneStore=[[TXSceneStore alloc] initWithDefaults:(NSUserDefaults*)(id)badDefaults];NSMenu *readOnly=[app sceneActionMenu];check(app->_sceneStore.readOnly&&![readOnly.itemArray[2] isEnabled]&&[TXSceneStore snapshot:beforeStop equals:[app sceneSnapshot]],@"read-only storage disables mutation without changing mix");app->_sceneStore=goodStore;
+    app->_desiredRunning=YES;app->_explicitStop=NO;app->_pickup=YES;NSMutableDictionary *pickupScene=[original mutableCopy];NSMutableArray *pickupChannels=[original[@"channels"] mutableCopy];NSMutableDictionary *pickupChannel=[pickupChannels[1] mutableCopy];pickupChannel[@"gain"]=@.5;pickupChannels[1]=pickupChannel;pickupScene[@"channels"]=pickupChannels;
+    audio.firstStartGate=dispatch_semaphore_create(0);audio.blockStart=audio.starts+1;[app recallSnapshot:pickupScene sceneID:desk recordUndo:YES];check(until(^BOOL{return audio.starts==audio.blockStart;}),@"pickup regression blocks start");[app handleMIDI:@"fixture" channel:0 cc:2 value:20];[app handleMIDI:@"fixture" channel:0 cc:2 value:100];[app handleMIDI:@"fixture" channel:0 cc:26 value:127];[app handleMIDI:@"fixture" channel:0 cc:26 value:0];float masterBeforeEncoder=atomic_load(&audio.state->master);[app handleMIDI:@"fixture" channel:0 cc:31 value:1];[app handleMIDI:@"fixture" channel:0 cc:31 value:127];check(fabs(atomic_load(&audio.state->master)-masterBeforeEncoder)<.000001,@"relative encoder stays live and ordered");dispatch_semaphore_signal(audio.firstStartGate);check(until(done)&&app->_latched[1][0]&&fabs(atomic_load(&audio.state->gain[1])-100.0/127)<.000001&&atomic_load(&audio.state->muted[1]),@"ordered queued pickup crossing and button press release");app->_pickup=NO;
+    guard.endGate=dispatch_semaphore_create(0);[app recallSnapshot:original sceneID:desk recordUndo:YES];check(until(^BOOL{return guard.ending;}),@"late MIDI regression blocks guard end");[app handleMIDI:@"fixture" channel:0 cc:2 value:90];[app handleMIDI:@"fixture" channel:0 cc:26 value:127];[app handleMIDI:@"fixture" channel:0 cc:26 value:0];[app handleMIDI:@"fixture" channel:0 cc:31 value:1];float liveMaster=atomic_load(&audio.state->master);dispatch_semaphore_signal(guard.endGate);check(until(done)&&app->_sceneMIDI.count==0&&fabs(atomic_load(&audio.state->gain[1])-90.0/127)<.000001&&atomic_load(&audio.state->muted[1])&&fabs(atomic_load(&audio.state->master)-liveMaster)<.000001,@"guard end MIDI drains before final unlock and save");NSDictionary *lateProfile=[fixture.memoryDefaults objectForKey:@"TX6Mac.profile"];check(fabs([lateProfile[@"channels"][1][@"gain"] doubleValue]-90.0/127)<.000001&&[lateProfile[@"channels"][1][@"muted"] boolValue]&&fabs([lateProfile[@"master"] doubleValue]-liveMaster)<.000001,@"late MIDI and current master persist together");guard.endGate=nil;atomic_store(&audio.state->master,.4);
+    for(int repeat=0;repeat<2;repeat++){
+        [app->_sceneMIDI removeAllObjects];[app applySceneDSP:original];[app commitSceneModel:original sceneID:desk];app->_sceneStopping=NO;app->_desiredRunning=YES;app->_explicitStop=NO;audio.firstStartGate=dispatch_semaphore_create(0);audio.blockStart=audio.starts+1;[app recallSnapshot:target sceneID:desk recordUndo:YES];check(until(^BOOL{return audio.starts==audio.blockStart;}),@"stop race blocks start");app->_desiredRunning=NO;app->_explicitStop=YES;[app stopAudio];NSDictionary *pendingStop=app->_pendingHALRequest;for(NSMenuItem *item in [app sceneActionMenu].itemArray)if(item.action)check(!item.enabled,@"scene actions disabled during stop cleanup");
+        if(repeat==0){NSUInteger sceneCount=app->_sceneStore.scenes.count;NSError *blockedError=nil;[app recallSnapshot:original sceneID:desk recordUndo:YES];BOOL saved=[app saveSceneName:@"Must not save during stop" rename:NO error:&blockedError];check(!saved&&app->_sceneStore.scenes.count==sceneCount&&[app->_pendingHALRequest isEqual:pendingStop],@"stop rejects recall and save without replacing cleanup");}
+        else {[app stopAudio];check([app->_pendingHALRequest isEqual:pendingStop],@"repeated stop preserves original rollback request");check([app applicationShouldTerminate:NSApp]==NSTerminateLater&&[app applicationShouldTerminate:NSApp]==NSTerminateLater&&fixture.quitWaitRequested&&app->_sceneQuitting&&[app->_pendingHALRequest isEqual:pendingStop],@"repeated quit retains pending stop rollback and waits");}
+        dispatch_semaphore_signal(audio.firstStartGate);check(until(done)&&!app->_sceneStopping&&!app->_halStopping&&!guard.active&&[TXSceneStore snapshot:original equals:[app sceneSnapshot]],repeat==0?@"stop then recall finishes cleanly":@"repeated stop restores prior DSP and model");app->_sceneQuitting=NO;
+    }
+    app->_desiredRunning=YES;app->_explicitStop=NO;audio.firstStartGate=dispatch_semaphore_create(0);audio.blockStart=audio.starts+1;[app recallSnapshot:target sceneID:desk recordUndo:YES];check(until(^BOOL{return audio.starts==audio.blockStart;}),@"overflow test blocks start");for(NSUInteger i=0;i<=TXSceneMIDILimit;i++)[app handleMIDI:@"fixture" channel:0 cc:2 value:(UInt8)(i%128)];check(app->_sceneMIDI.count==TXSceneMIDILimit&&app->_sceneMIDIOverflow,@"pre-commit MIDI queue is bounded");dispatch_semaphore_signal(audio.firstStartGate);check(until(done)&&guard.active&&atomic_load(&audio.state->transitionMuted)&&!app->_audioReady&&app->_audioError.length,@"overflow fails closed instead of losing gestures silently");NSUInteger overflowStarts=audio.starts;[app rebuildAudio];check(!app->_pendingHALRequest&&audio.starts==overflowStarts,@"overflow suppresses automatic retry");app->_desiredRunning=NO;app->_explicitStop=YES;[app stopAudio];check(until(done)&&!guard.active&&!app->_sceneMIDIOverflow,@"stop recovers MIDI overflow");
+    app->_desiredRunning=YES;app->_explicitStop=NO;guard.endGate=dispatch_semaphore_create(0);[app recallSnapshot:original sceneID:desk recordUndo:YES];check(until(^BOOL{return guard.ending;}),@"large late queue blocks end");for(NSUInteger i=0;i<=TXSceneMIDILimit;i++)[app handleMIDI:@"fixture" channel:0 cc:2 value:(UInt8)(i%128)];check(app->_sceneMIDI.count<=TXSceneMIDILimit&&!app->_sceneMIDIOverflow&&atomic_load(&audio.state->transitionMuted),@"committed MIDI batches drain in order without overflow");dispatch_semaphore_signal(guard.endGate);check(until(done)&&app->_sceneMIDI.count==0&&atomic_load(&audio.state->gain[1])==0&&!atomic_load(&audio.state->transitionMuted),@"late batch tail replays before gate release");guard.endGate=nil;app->_desiredRunning=NO;[app stopAudio];check(until(done),@"MIDI race fixture cleanup");
     check(fabs(atomic_load(&audio.state->master)-.4)<.000001&&atomic_load(&audio.state->masterMuted),@"all failures preserve global controls");fprintf(stderr,"TX6Mac scene controller and guarded recall self-check: %s\n",ok?"PASS":"FAIL");return ok;
 }
 + (BOOL)halSelfCheck {
@@ -1129,13 +1148,14 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     return duplicateMenusOK&&scopeMenusOK&&monitorIdentityOK&&meterIdentityOK&&retryIdentityOK&&mainRetryIdentityOK&&mainIdentityOK;
 }
 - (void)stopAudio {
-    NSDictionary *restore=_sceneApplying&&!_sceneModelCommitted?_sceneBaseline:nil;_sceneStopping=restore!=nil;
+    if(_halStopping)return;
+    NSDictionary *restore=_sceneApplying&&!_sceneModelCommitted?_sceneBaseline:nil;_sceneStopping=YES;_sceneMIDIOverflow=NO;
     atomic_fetch_add(&_sceneGeneration,1);_sceneApplying=NO;_sceneBaseline=nil;_sceneRollbackRequest=nil;[_sceneMIDI removeAllObjects];
     _audioReady=NO;_usbMetering=NO;_monitoring=NO;_isBuilding=NO;_halStopping=YES;_pendingAudioSignature=nil;_halGeneration++;
     _pendingHALRequest=@{@"kind":@"stop",@"generation":@(_halGeneration),@"restore":restore?:@{}};[self processHALWork];
 }
 - (void)rebuildAudio {
-    if(_sceneApplying||_sceneStopping)return;
+    if(_sceneApplying||_sceneStopping||_sceneMIDIOverflow)return;
     if(_sceneProtected&&_desiredRunning&&!_sleeping&&!_explicitStop&&!_retryAt){[self recallSnapshot:[self runtimeSceneSnapshot] sceneID:_selectedSceneID recordUndo:NO runtime:YES];return;}
     if(!_desiredRunning||_sleeping||_explicitStop||_retryAt||(!_audioReady&&_retryExhausted))return;
     if(!_halSnapshotReady){[self requestHALSnapshot];return;}
@@ -1246,9 +1266,14 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     BOOL hit=fabs(value-current)<=tolerance||(_havePrevious[slot][parameter]&&(_previous[slot][parameter]-current)*(value-current)<=0);
     _previous[slot][parameter]=value;_havePrevious[slot][parameter]=YES;if(hit)_latched[slot][parameter]=YES;return hit;
 }
+- (void)drainSceneMIDI {
+    if(_sceneMIDIOverflow)return;NSArray *queued=[_sceneMIDI copy];[_sceneMIDI removeAllObjects];_sceneReplayingMIDI=YES;
+    for(NSDictionary *event in queued)[self handleMIDI:event[@"source"] channel:0 cc:[event[@"cc"] unsignedCharValue] value:[event[@"value"] unsignedCharValue]];
+    _sceneReplayingMIDI=NO;
+}
 - (void)handleMIDI:(NSString*)source channel:(UInt8)channel cc:(UInt8)cc value:(UInt8)value {
     _lastMIDI=[NSString stringWithFormat:@"%@ · CH %d / CC %d / %d",source,channel+1,cc,value];if(_audioError.length)_canvas.message=_audioError;
-    if(channel!=0){[self updateStatus];return;}if([self consumeDeviceContextCC:cc value:value])return;if(_sceneApplying&&cc>=1&&cc<=30){if(!_sceneMIDI)_sceneMIDI=[NSMutableArray array];if(cc<=24){NSIndexSet *old=[_sceneMIDI indexesOfObjectsPassingTest:^BOOL(NSDictionary *e,NSUInteger i,BOOL *stop){return [e[@"cc"] unsignedCharValue]==cc;}];[_sceneMIDI removeObjectsAtIndexes:old];}if(cc<=24||value>=64)[_sceneMIDI addObject:@{@"source":source?:@"",@"cc":@(cc),@"value":@(value)}];return;}TXRenderState *s=_audio.state;
+    if(channel!=0){[self updateStatus];return;}if(!_sceneReplayingMIDI&&[self consumeDeviceContextCC:cc value:value])return;if(_sceneApplying&&!_sceneReplayingMIDI&&cc>=1&&cc<=30){if(!_sceneMIDI)_sceneMIDI=[NSMutableArray array];if(_sceneMIDI.count==TXSceneMIDILimit&&_sceneModelCommitted&&!_sceneMIDIOverflow)[self drainSceneMIDI];if(_sceneMIDI.count<TXSceneMIDILimit&&!_sceneMIDIOverflow)[_sceneMIDI addObject:@{@"source":source?:@"",@"cc":@(cc),@"value":@(value)}];else _sceneMIDIOverflow=YES;return;}TXRenderState *s=_audio.state;
     if(cc>=1&&cc<=6){int i=cc-1;if(![self canAdjustVolumeForSlot:i]){[self showBrowserCaptureHint:i];[self writeStatus];return;}double v=(_invert?127-value:value)/127.0;BOOL hit=[self pickupValue:v slot:i parameter:0 current:atomic_load(&s->gain[i])];_channels[i].fader.awaitingPickup=!hit;if(!hit)_canvas.message=[NSString stringWithFormat:TXL(@"픽업 대기 · 트랙 %d 페이더를 %.0f 위치까지 움직이면 연결됩니다."),i+1,(double)TXVolumeValue(atomic_load(&s->gain[i]))];if(hit){atomic_store(&s->gain[i],v);_channels[i].fader.value=v;}[self showHUDForSlot:i message:hit?TXVolumeHUD(v):[NSString stringWithFormat:TXL(@"픽업 대기 · %.0f"),(double)TXVolumeValue(atomic_load(&s->gain[i]))]];}
     else if(cc>=7&&cc<=24){int bank=(cc-7)/6,i=(cc-7)%6,b=2-bank;if(![self canAdjustVolumeForSlot:i]){[self showBrowserCaptureHint:i];[self writeStatus];return;}double db=abs((int)value-64)<=1?0:(value/127.0*36-18);TXKnob *k=_channels[i].knobs[bank];BOOL hit=[self pickupValue:db slot:i parameter:b+1 current:atomic_load(&s->eq[i][b])];k.awaitingPickup=!hit;if(!hit)_canvas.message=[NSString stringWithFormat:TXL(@"픽업 대기 · 트랙 %d %@ 노브를 %+.1f dB에 맞추면 연결됩니다."),i+1,k.caption,atomic_load(&s->eq[i][b])];if(hit){atomic_store(&s->eq[i][b],db);k.value=db;}[self showHUDForSlot:i message:hit?[NSString stringWithFormat:@"%@ %+.1f dB",k.caption,db]:[NSString stringWithFormat:TXL(@"%@ 픽업 · %+.1f dB"),k.caption,atomic_load(&s->eq[i][b])]];}
     else if(cc>=25&&cc<=30&&value>=64){int i=cc-25;BOOL mute=!atomic_load(&s->muted[i]);atomic_store(&s->muted[i],mute);_channels[i].mute.state=mute?NSControlStateValueOn:NSControlStateValueOff;[self showHUDForSlot:i message:mute?TXL(@"음소거"):TXL(@"음소거 해제")];}
@@ -1302,12 +1327,13 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (void)showWindow:(id)sender {[_window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];}
 - (BOOL)windowShouldClose:(NSWindow*)window {[window orderOut:nil];return NO;}
 - (BOOL)applicationShouldHandleReopen:(NSApplication*)app hasVisibleWindows:(BOOL)visible {[self showWindow:nil];return YES;}
-- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender {if(_sceneQuitting)return NSTerminateNow;_sceneQuitting=YES;[_poll invalidate];[_meter invalidate];_desiredRunning=NO;_explicitStop=YES;[self stopAudio];[self finishSceneQuit];return NSTerminateLater;}
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender {if(_sceneQuitting)return (_halBusy||_halStopping||_pendingHALRequest)?NSTerminateLater:NSTerminateNow;_sceneQuitting=YES;[_poll invalidate];[_meter invalidate];_desiredRunning=NO;_explicitStop=YES;[self stopAudio];[self finishSceneQuit];return NSTerminateLater;}
 - (void)finishSceneQuit {if(_halBusy||_pendingHALRequest){[self performSelector:@selector(finishSceneQuit) withObject:nil afterDelay:.02];return;}[self saveSettings];[NSApp replyToApplicationShouldTerminate:YES];}
 - (void)applicationWillTerminate:(NSNotification*)notification {[_poll invalidate];[_meter invalidate];[_hudDismiss invalidate];[_hud orderOut:nil];[self saveSettings];[self stopAudio];[_browser stop];[_midi stop];[self writeStatus];}
 @end
 
 @implementation TXSceneCheckApp
+- (void)finishSceneQuit {self.quitWaitRequested=YES;}
 - (NSUserDefaults*)profileDefaults {return (NSUserDefaults*)(id)self.memoryDefaults;}
 @end
 
