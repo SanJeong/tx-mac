@@ -1,10 +1,12 @@
 # tx-mac
 
-A macOS mixer controlled with a teenage engineering TX-6 over USB or Bluetooth MIDI.
+Control macOS app volume, EQ, and main/monitor routing with a teenage engineering TX-6 over USB or Bluetooth MIDI.
 
 ![tx-mac](assets/mixer.png)
 
-Requires macOS 26. Building requires Xcode Command Line Tools.
+[Download for macOS](https://github.com/SanJeong/tx-mac/releases/latest). Requires macOS 26 or later and Apple Silicon.
+
+To build from a source checkout, install Xcode Command Line Tools and run:
 
 ```sh
 ./install.command
