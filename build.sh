@@ -12,8 +12,8 @@ if [[ -z "${SIGN_IDENTITY+x}" ]]; then
     END { if (developer_id) print developer_id; else if (development) print development; else print "-" }
   ')"
 fi
-APP_VERSION="${APP_VERSION:-1.0.0}"
-BUILD_NUMBER="${BUILD_NUMBER:-4}"
+APP_VERSION="${APP_VERSION:-1.0.1}"
+BUILD_NUMBER="${BUILD_NUMBER:-5}"
 fail() { print -u2 -- "$*"; exit 1; }
 [[ "$DEST" == *.app ]] || fail 'Build destination must end in .app.'
 [[ ! -L "$DEST" ]] || fail 'Refusing to replace a symlink.'
@@ -52,8 +52,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleDevelopmentRegion</key><string>en</string>
 <key>CFBundleLocalizations</key><array><string>en</string><string>ko</string><string>ja</string></array>
-<key>CFBundleShortVersionString</key><string>1.0.0</string>
-<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleShortVersionString</key><string>1.0.1</string>
+<key>CFBundleVersion</key><string>5</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>LSMultipleInstancesProhibited</key><true/>
 <key>NSHighResolutionCapable</key><true/>

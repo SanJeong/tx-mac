@@ -344,7 +344,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     NSMenu *_statusMenu;CABTLEMIDIWindowController *_bluetooth;
     NSPopUpButton *_outputMenu,*_transportMenu,*_languageMenu;NSWindow *_setupWindow;NSTextField *_setupDevice,*_setupAudio;NSButton *_setupStart;BOOL _sleepResume,_sleeping,_autoStart,_explicitStop,_retryExhausted,_audioStartConsent;NSUInteger _retryAttempt;NSDate *_retryAt,*_lastStatusWrite;NSButton *_autoStartButton;NSButton *_startButton,*_pickupButton,*_invertButton,*_masterMute,*_soundKey,*_autoButton,*_hudButton;TXHUDPanel *_hud;TXHUDView *_hudView;NSTimer *_hudDismiss;NSDictionary *_pendingHUD;BOOL _hudEnabled,_statusMenuTracking;NSPopover *_settingsPopover;TXDeviceContext _deviceContext;NSTextField *_deviceContextLabel,*_calibrationInput;NSButton *_resumeDeviceButton;
     TXFader *_masterFader;NSArray<TXChannel*> *_channels;NSTextField *_remainderLabel;
-    BOOL _browserTabMode,_controllerConnected;NSButton *_browserTabsButton;
+    BOOL _browserTabMode,_controllerConnected,_followDefaultOutput;NSButton *_browserTabsButton;
     NSArray<NSDictionary*> *_outputs,*_processes;NSMutableArray<NSString*> *_assignments;NSString *_outputUID,*_signature,*_statusFile,*_lastMIDI;
     NSTimer *_poll,*_meter;BOOL _desiredRunning,_isBuilding,_pickup,_invert,_autoAssign;NSInteger _overflowCount;NSString *_outputMenuSignature,*_processMenuSignature;NSDate *_startedAt,*_progressAt;uint64_t _progressFrames;BOOL _latched[6][4];double _previous[6][4];BOOL _havePrevious[6][4];
     NSMenuItem *_masterMenuLabel;NSSlider *_menuMaster;NSMutableArray<NSMenuItem*> *_muteItems;NSDate *_lastSave,*_lastLimitDate;uint64_t _lastLimitedFrames;
@@ -374,13 +374,13 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     if(![d[@"assignments"] isKindOfClass:NSArray.class])d[@"assignments"]=@[];
     NSMutableArray *safeChannels=[NSMutableArray array];id rawChannels=d[@"channels"];
     if([rawChannels isKindOfClass:NSArray.class])for(id raw in rawChannels){NSMutableDictionary *channel=[NSMutableDictionary dictionary];if([raw isKindOfClass:NSDictionary.class]){for(NSString *key in @[@"gain",@"muted"])if([raw[key] isKindOfClass:NSNumber.class]&&isfinite([raw[key] doubleValue]))channel[key]=raw[key];NSMutableArray *eq=[NSMutableArray array];id rawEQ=raw[@"eq"];if([rawEQ isKindOfClass:NSArray.class])for(id value in rawEQ)[eq addObject:[value isKindOfClass:NSNumber.class]&&isfinite([value doubleValue])?value:@0];channel[@"eq"]=eq;}[safeChannels addObject:channel];}d[@"channels"]=safeChannels;
-    for(NSString *key in @[@"master",@"showHUD",@"autoAssign",@"chromeTabs",@"pickup",@"invert",@"autoStart"])if(d[key]&&(![d[key] isKindOfClass:NSNumber.class]||!isfinite([d[key] doubleValue])))[d removeObjectForKey:key];
+    for(NSString *key in @[@"master",@"showHUD",@"autoAssign",@"chromeTabs",@"pickup",@"invert",@"autoStart",@"followDefaultOutput"])if(d[key]&&(![d[key] isKindOfClass:NSNumber.class]||!isfinite([d[key] doubleValue])))[d removeObjectForKey:key];
     if(![d[@"outputUID"] isKindOfClass:NSString.class])[d removeObjectForKey:@"outputUID"];
     if(![@[@"auto",@"usb",@"ble"] containsObject:d[@"transport"]?:@""])[d removeObjectForKey:@"transport"];
     NSArray *saved=d[@"assignments"];for(int i=0;i<6;i++)[_assignments addObject:(saved.count>(NSUInteger)i&&[saved[i] isKindOfClass:NSString.class])?saved[i]:@""];
     if([_assignments[0] isEqual:@"local.tx6mac.system-sounds"]){NSMutableSet *seen=[NSMutableSet setWithObject:@"local.tx6mac.system-sounds"];for(int i=1;i<6;i++){NSString *key=_assignments[i];if(key.length&&[seen containsObject:key])_assignments[i]=@"";else if(key.length)[seen addObject:key];}}
     else {NSMutableArray *migrated=[NSMutableArray array];for(NSString *key in _assignments)if(key.length&&![key isEqual:@"local.tx6mac.system-sounds"]&&![migrated containsObject:key])[migrated addObject:key];[_assignments removeAllObjects];[_assignments addObject:@"local.tx6mac.system-sounds"];for(int i=0;i<5;i++)[_assignments addObject:migrated.count>(NSUInteger)i?migrated[i]:@""]; }
-    _outputUID=d[@"outputUID"]?:@"";_midi.transport=d[@"transport"]?:@"auto";
+    _outputUID=d[@"outputUID"]?:@"";_followDefaultOutput=d[@"followDefaultOutput"]?[d[@"followDefaultOutput"] boolValue]:!_outputUID.length;_midi.transport=d[@"transport"]?:@"auto";
     _browserTabMode=[d[@"chromeTabs"] boolValue];_hudEnabled=d[@"showHUD"]?[d[@"showHUD"] boolValue]:YES;_autoAssign=d[@"autoAssign"]?[d[@"autoAssign"] boolValue]:YES;_pickup=d[@"pickup"]?[d[@"pickup"] boolValue]:NO;_autoStart=d[@"autoStart"]?[d[@"autoStart"] boolValue]:YES;if(![[NSUserDefaults standardUserDefaults] boolForKey:@"TX6Mac.directControlV1"]){_pickup=NO;[[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"TX6Mac.directControlV1"];}_invert=[d[@"invert"] boolValue];
     TXRenderState *s=_audio.state;atomic_store(&s->master,d[@"master"]?fmax(0,fmin(1,[d[@"master"] floatValue])):1);
     for(int i=0;i<6;i++){
@@ -394,7 +394,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (void)saveSettings {
     NSMutableArray *channels=[NSMutableArray array];TXRenderState *s=_audio.state;
     for(int i=0;i<6;i++)[channels addObject:@{@"gain":@(atomic_load(&s->gain[i])),@"muted":@(atomic_load(&s->muted[i])),@"eq":@[@(atomic_load(&s->eq[i][0])),@(atomic_load(&s->eq[i][1])),@(atomic_load(&s->eq[i][2]))]}];
-    [[NSUserDefaults standardUserDefaults] setObject:@{@"assignments":_assignments,@"outputUID":_outputUID?:@"",@"transport":_midi.transport?:@"auto",@"autoAssign":@(_autoAssign),@"chromeTabs":@(_browserTabMode),@"autoStart":@(_autoStart),@"showHUD":@(_hudEnabled),@"pickup":@(_pickup),@"invert":@(_invert),@"master":@(atomic_load(&s->master)),@"channels":channels} forKey:@"TX6Mac.profile"];
+    [[NSUserDefaults standardUserDefaults] setObject:@{@"assignments":_assignments,@"outputUID":_outputUID?:@"",@"followDefaultOutput":@(_followDefaultOutput),@"transport":_midi.transport?:@"auto",@"autoAssign":@(_autoAssign),@"chromeTabs":@(_browserTabMode),@"autoStart":@(_autoStart),@"showHUD":@(_hudEnabled),@"pickup":@(_pickup),@"invert":@(_invert),@"master":@(atomic_load(&s->master)),@"channels":channels} forKey:@"TX6Mac.profile"];
     _lastSave=NSDate.date;[self sendBrowserControls];
 }
 - (void)buildWindow {
@@ -474,7 +474,8 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
         [menu addItem:channel];
     }
     [menu addItem:NSMenuItem.separatorItem];NSMenuItem *output=[[NSMenuItem alloc] initWithTitle:TXL(@"출력 장치") action:nil keyEquivalent:@""];NSMenu *outs=[NSMenu new];output.submenu=outs;
-    for(NSDictionary *d in _outputs){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:d[@"name"] action:@selector(menuOutput:) keyEquivalent:@""];item.target=self;item.representedObject=d[@"uid"];item.state=[d[@"uid"] isEqual:_outputUID]?NSControlStateValueOn:NSControlStateValueOff;[outs addItem:item];}[menu addItem:output];
+    NSMenuItem *systemOutput=[[NSMenuItem alloc] initWithTitle:[self systemOutputTitle] action:@selector(menuOutput:) keyEquivalent:@""];systemOutput.target=self;systemOutput.representedObject=@"";systemOutput.state=_followDefaultOutput?NSControlStateValueOn:NSControlStateValueOff;[outs addItem:systemOutput];[outs addItem:NSMenuItem.separatorItem];
+    for(NSDictionary *d in _outputs){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:d[@"name"] action:@selector(menuOutput:) keyEquivalent:@""];item.target=self;item.representedObject=d[@"uid"];item.state=!_followDefaultOutput&&[d[@"uid"] isEqual:_outputUID]?NSControlStateValueOn:NSControlStateValueOff;[outs addItem:item];}[menu addItem:output];
     for(NSArray *entry in @[@[TXL(@"믹서 창 열기"),NSStringFromSelector(@selector(showWindow:))],@[TXL(@"Bluetooth 연결…"),NSStringFromSelector(@selector(showBluetooth:))],@[_desiredRunning?TXL(@"믹서 중지 · 원음 복구"):TXL(@"믹서 시작"),NSStringFromSelector(@selector(toggleMixer:))]]){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:@""];item.target=self;[menu addItem:item];}
     [menu addItem:NSMenuItem.separatorItem];NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:TXL(@"종료 · 원음 복구") action:@selector(terminate:) keyEquivalent:@"q"];[menu addItem:quit];
 }
@@ -503,12 +504,15 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     _processes=TXBrowserProcesses(native,_browser.tabs,_assignments,_browserTabMode);[self autoMatch];
     [self refreshDeviceMenus];
 }
+- (NSString*)systemOutputTitle {
+    NSString *title=TXL(@"시스템 기본 출력");for(NSDictionary *device in _outputs)if([device[@"uid"] isEqual:_halSnapshot[@"defaultUID"]])return [title stringByAppendingFormat:@" · %@",device[@"name"]];return title;
+}
 - (void)refreshDeviceMenus {
-    NSString *outSig=[NSString stringWithFormat:@"%@|%@",_outputs,_outputUID];BOOL outputChanged=![_outputMenuSignature isEqual:outSig];_outputMenuSignature=outSig;
+    NSString *outSig=[NSString stringWithFormat:@"%@|%@|%@|%d",_outputs,_outputUID,_halSnapshot[@"defaultUID"],_followDefaultOutput];BOOL outputChanged=![_outputMenuSignature isEqual:outSig];_outputMenuSignature=outSig;
     NSMutableArray *processMenu=[NSMutableArray array];for(NSDictionary *p in _processes)[processMenu addObject:@[p[@"key"],p[@"name"]]];NSString *processSig=[NSString stringWithFormat:@"%@|%@",processMenu,_assignments];BOOL processesChanged=![_processMenuSignature isEqual:processSig];_processMenuSignature=processSig;
-    if(outputChanged){[_outputMenu removeAllItems];for(NSDictionary *d in _outputs){[_outputMenu addItemWithTitle:[NSString stringWithFormat:@"%@  ·  %@ ch",d[@"name"],d[@"channels"]]];_outputMenu.lastItem.representedObject=d[@"uid"];if([d[@"uid"] isEqual:_outputUID])[_outputMenu selectItem:_outputMenu.lastItem];}
+    if(outputChanged){[_outputMenu removeAllItems];[_outputMenu addItemWithTitle:[self systemOutputTitle]];_outputMenu.lastItem.representedObject=@"";if(_followDefaultOutput)[_outputMenu selectItem:_outputMenu.lastItem];[_outputMenu.menu addItem:NSMenuItem.separatorItem];for(NSDictionary *d in _outputs){[_outputMenu addItemWithTitle:[NSString stringWithFormat:@"%@  ·  %@ ch",d[@"name"],d[@"channels"]]];_outputMenu.lastItem.representedObject=d[@"uid"];if(!_followDefaultOutput&&[d[@"uid"] isEqual:_outputUID])[_outputMenu selectItem:_outputMenu.lastItem];}
     BOOL found=NO;for(NSDictionary *d in _outputs)if([d[@"uid"] isEqual:_outputUID])found=YES;
-    if(!found){[_outputMenu addItemWithTitle:TXL(@"선택한 출력 장치가 연결되지 않음")];_outputMenu.lastItem.representedObject=_outputUID;[_outputMenu selectItem:_outputMenu.lastItem];}}
+    if(!found&&!_followDefaultOutput){[_outputMenu addItemWithTitle:TXL(@"선택한 출력 장치가 연결되지 않음")];_outputMenu.lastItem.representedObject=_outputUID;[_outputMenu selectItem:_outputMenu.lastItem];}}
     if(processesChanged)for(int i=0;i<6;i++){
         TXChannel *c=_channels[i];[c.assignment removeAllItems];[c.assignment addItemWithTitle:_autoAssign?TXL(@"재생 앱 대기…"):TXL(@"앱 지정…")];c.assignment.lastItem.representedObject=@"";BOOL present=!_assignments[i].length;
         for(NSDictionary *p in _processes){NSString *key=p[@"key"];if(![p[@"isSystemSound"] boolValue]&&![self isAutomaticCandidate:p]&&![key isEqual:_assignments[i]])continue;BOOL used=NO;for(int j=0;j<6;j++)if(j!=i&&[_assignments[j] isEqual:key])used=YES;if(used)continue;
@@ -571,7 +575,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (NSDictionary*)selectedOutput {for(NSDictionary *d in _outputs)if([d[@"uid"] isEqual:_outputUID])return d;return nil;}
 - (NSString*)currentSignature {
     NSDictionary *d=[self selectedOutput];double rate=[d[@"rate"] doubleValue];
-    return [NSString stringWithFormat:@"%@|%.0f|%@",_outputUID,rate,[self currentGroups]];
+    return [NSString stringWithFormat:@"%@|%@|%.0f|%@",_outputUID,d[@"id"]?:@0,rate,[self currentGroups]];
 }
 - (void)scheduleRecovery {
     if(!_desiredRunning||_explicitStop||_sleeping||_retryAt)return;if(!TXMayAutoStart(_autoStart,_audioStartConsent,_explicitStop,_sleeping)){_retryExhausted=YES;return;}
@@ -581,11 +585,14 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     _halSnapshotRequested=YES;[self processHALWork];
 }
 - (void)applyHALSnapshot:(NSDictionary*)snapshot {
-    BOOL hadOutput=[self selectedOutput]!=nil;
+    NSDictionary *previousOutput=[self selectedOutput];BOOL hadOutput=previousOutput!=nil;NSString *previousUID=_outputUID;
     _halSnapshot=snapshot?:@{};_halSnapshotReady=YES;
-    if(!_outputUID.length)_outputUID=_halSnapshot[@"defaultUID"]?:@"";
+    NSString *defaultUID=_halSnapshot[@"defaultUID"]?:@"";BOOL selectedPresent=NO,defaultPresent=NO;
+    for(NSDictionary *device in _halSnapshot[@"outputs"]){if([device[@"uid"] isEqual:_outputUID])selectedPresent=YES;if([device[@"uid"] isEqual:defaultUID])defaultPresent=YES;}
+    if(defaultPresent&&(_followDefaultOutput||!selectedPresent)){_outputUID=defaultUID;_followDefaultOutput=YES;}
     [self refreshDevices];
-    if(!hadOutput&&[self selectedOutput]&&_desiredRunning&&!_explicitStop){_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;}
+    BOOL routeChanged=![previousUID isEqual:_outputUID]||![previousOutput[@"id"] isEqual:[self selectedOutput][@"id"]];
+    if((!hadOutput||routeChanged)&&[self selectedOutput]&&_desiredRunning&&!_explicitStop){_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;}
     if(_desiredRunning&&!_sleeping&&!_explicitStop&&!_retryAt&&(!_audioReady||![_signature isEqual:[self currentSignature]]))[self rebuildAudio];
 }
 - (void)processHALWork {
@@ -657,7 +664,27 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     [app applyHALSnapshot:@{@"outputs":@[@{@"id":@3,@"uid":@"fixtureC",@"name":@"fixture",@"rate":@48000}],@"processes":@[],@"defaultUID":@"fixtureC"}];
     if(app->_retryExhausted||app->_retryAttempt||!until(^BOOL{return app->_audioReady&&!app->_halBusy;}))return NO;
     app->_desiredRunning=NO;[app stopAudio];
-    return until(^BOOL{return !app->_halBusy&&!app->_pendingHALRequest;})&&!app->_audioReady&&backend.stops==3&&!backend.usedMain;
+    if(!until(^BOOL{return !app->_halBusy&&!app->_pendingHALRequest;})||app->_audioReady||backend.stops!=3||backend.usedMain)return NO;
+    TXApp *routing=[TXApp new];routing->_audio=[TXAudio new];routing->_assignments=[@[@"local.tx6mac.system-sounds",@"",@"",@"",@"",@""] mutableCopy];routing->_outputs=@[];routing->_processes=@[];routing->_outputUID=@"disconnected-output";
+    [routing applyHALSnapshot:@{@"outputs":@[@{@"id":@1,@"uid":@"fixtureA",@"name":@"fixture",@"rate":@48000}],@"processes":@[],@"defaultUID":@"fixtureA"}];
+    if(![routing->_outputUID isEqual:@"fixtureA"]){fprintf(stderr,"Disconnected output did not fall back to the system output\n");return NO;}
+    NSArray *devices=@[@{@"id":@1,@"uid":@"fixtureA",@"name":@"A",@"rate":@48000},@{@"id":@2,@"uid":@"fixtureB",@"name":@"B",@"rate":@48000}];
+    NSDictionary *defaultB=@{@"outputs":devices,@"processes":@[],@"defaultUID":@"fixtureB"};
+    [routing applyHALSnapshot:defaultB];if(!routing->_followDefaultOutput||![routing->_outputUID isEqual:@"fixtureB"])return NO;
+    routing->_followDefaultOutput=NO;routing->_outputUID=@"fixtureA";
+    [routing applyHALSnapshot:defaultB];if(routing->_followDefaultOutput||![routing->_outputUID isEqual:@"fixtureA"])return NO;
+    routing->_followDefaultOutput=YES;
+    [routing applyHALSnapshot:@{@"outputs":devices,@"processes":@[],@"defaultUID":@"not-enumerated-yet"}];if(![routing->_outputUID isEqual:@"fixtureA"])return NO;
+    routing->_outputUID=@"";[routing applyHALSnapshot:@{@"outputs":@[],@"processes":@[],@"defaultUID":@""}];if([routing selectedOutput])return NO;
+    routing->_desiredRunning=YES;routing->_explicitStop=YES;[routing applyHALSnapshot:defaultB];if(![routing->_outputUID isEqual:@"fixtureB"]||routing->_isBuilding||routing->_pendingHALRequest)return NO;
+    app->_followDefaultOutput=YES;app->_desiredRunning=YES;app->_retryExhausted=YES;app->_retryAttempt=3;
+    [app applyHALSnapshot:defaultB];if(app->_retryExhausted||app->_retryAttempt||!until(^BOOL{return app->_audioReady&&!app->_halBusy;}))return NO;
+    app->_desiredRunning=NO;[app stopAudio];if(!until(^BOOL{return !app->_halBusy&&!app->_pendingHALRequest;})||backend.stops!=4)return NO;
+    app->_followDefaultOutput=NO;app->_desiredRunning=YES;app->_retryExhausted=YES;app->_retryAttempt=3;
+    [app applyHALSnapshot:@{@"outputs":@[@{@"id":@22,@"uid":@"fixtureB",@"name":@"B",@"rate":@48000}],@"processes":@[],@"defaultUID":@"fixtureB"}];
+    if(app->_retryExhausted||app->_retryAttempt||!until(^BOOL{return app->_audioReady&&!app->_halBusy;}))return NO;
+    app->_desiredRunning=NO;[app stopAudio];if(!until(^BOOL{return !app->_halBusy&&!app->_pendingHALRequest;})||backend.stops!=5)return NO;
+    return YES;
 }
 - (void)stopAudio {
     _audioReady=NO;_isBuilding=NO;_halStopping=YES;_pendingAudioSignature=nil;_halGeneration++;
@@ -710,7 +737,8 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     NSData *json=[NSJSONSerialization dataWithJSONObject:d options:NSJSONWritingPrettyPrinted error:nil];[json writeToFile:_statusFile options:NSDataWritingAtomic error:nil];
 }
 - (void)assignmentChanged:(NSPopUpButton*)sender {if(sender.tag==0)return;_autoAssign=NO;_autoButton.state=NSControlStateValueOff;_assignments[sender.tag]=sender.selectedItem.representedObject?:@"";memset(_latched[sender.tag],0,sizeof(_latched[sender.tag]));memset(_havePrevious[sender.tag],0,sizeof(_havePrevious[sender.tag]));[self saveSettings];[self refreshDevices];if(_desiredRunning)[self rebuildAudio];}
-- (void)outputChanged:(NSPopUpButton*)sender {if(_desiredRunning){_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;}_outputUID=sender.selectedItem.representedObject;[self saveSettings];if(_desiredRunning)[self rebuildAudio];[self updateStatus];}
+- (void)selectOutputPreference:(NSString*)uid {if(_desiredRunning){_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;}_followDefaultOutput=!uid.length;if(uid.length)_outputUID=uid;[self applyHALSnapshot:_halSnapshot];[self saveSettings];[self updateStatus];}
+- (void)outputChanged:(NSPopUpButton*)sender {[self selectOutputPreference:sender.selectedItem.representedObject];}
 - (void)transportChanged:(NSPopUpButton*)sender {_midi.transport=sender.selectedItem.representedObject;[_midi refresh];[self saveSettings];[self updateStatus];}
 - (void)settingsChanged:(id)sender {BOOL pickup=_pickupButton.state==NSControlStateValueOn,invert=_invertButton.state==NSControlStateValueOn;if(_pickup!=pickup||_invert!=invert){_pickup=pickup;_invert=invert;for(int i=0;i<6;i++)[self clearPickupForSlot:i];}_hudEnabled=_hudButton.state==NSControlStateValueOn;if(!_hudEnabled){_pendingHUD=nil;[self hideHUD:nil];}[self saveSettings];}
 - (void)gainChanged:(TXFader*)sender {int i=(int)sender.tag;if(![self canAdjustVolumeForSlot:i]){sender.value=atomic_load(&_audio.state->gain[i]);[self showBrowserCaptureHint:i];return;}atomic_store(&_audio.state->gain[i],sender.value);_latched[i][0]=NO;sender.awaitingPickup=_pickup;[self showHUDForSlot:i message:[NSString stringWithFormat:@"VOLUME %.0f%%",sender.value*100]];[self saveSettings];}
@@ -728,7 +756,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 }
 - (void)menuMute:(NSMenuItem*)sender {int slot=(int)sender.tag;BOOL mute=!atomic_load(&_audio.state->muted[slot]);atomic_store(&_audio.state->muted[slot],mute);_channels[slot].mute.state=mute?NSControlStateValueOn:NSControlStateValueOff;sender.state=_channels[slot].mute.state;[self showHUDForSlot:slot message:mute?TXL(@"음소거"):TXL(@"음소거 해제")];[self saveSettings];}
 - (void)masterMenuMute:(NSMenuItem*)sender {atomic_store(&_audio.state->masterMuted,!atomic_load(&_audio.state->masterMuted));sender.state=atomic_load(&_audio.state->masterMuted)?NSControlStateValueOn:NSControlStateValueOff;[self showHUDForSlot:-1 message:atomic_load(&_audio.state->masterMuted)?TXL(@"전체 음소거"):TXL(@"전체 음소거 해제")];[self updateStatus];}
-- (void)menuOutput:(NSMenuItem*)sender {if(_desiredRunning){_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;}_outputUID=sender.representedObject;[self refreshDevices];[self saveSettings];if(_desiredRunning)[self rebuildAudio];[self updateStatus];}
+- (void)menuOutput:(NSMenuItem*)sender {[self selectOutputPreference:sender.representedObject];}
 - (void)deviceConnectionChanged {
     if(_midi.sources.count&&TXMayAutoStart(_autoStart,_audioStartConsent,_explicitStop,_sleeping)&&!_audioReady){_desiredRunning=YES;_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;[self rebuildAudio];}
     BOOL connected=_midi.sources.count>0;
