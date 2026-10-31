@@ -197,6 +197,8 @@ static BOOL ChannelPointer(const AudioBufferList *list,UInt32 channel,float **pt
         }offset+=buf->mNumberChannels;
     }return NO;
 }
+// +3 dB applies only to USB meter audio, excluding calibrated reference tones.
+static const float USBMeterGain=1.41253754f;
 static float MeterReference(uint64_t frame,double rate) {
     uint64_t length=(uint64_t)(rate*4),step=frame/length,position=frame%length;
     if(step>=3)return 0;
@@ -267,6 +269,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
             else if(routes[slot]==TXOutputMonitor&&s->monitorEnabled)mirrorGain=masterGain*monitorGain;
             float l=slotPCM[slot][0]*mirrorGain,r=slotPCM[slot][1]*mirrorGain;
             if(reference)l=r=slot==1&&!masterMuted?test:0;
+            else{l*=USBMeterGain;r*=USBMeterGain;}
             if(!isfinite(l))l=0;if(!isfinite(r))r=0;
             float p=fmaxf(fabsf(l),fabsf(r)),g=p>0.98f?0.98f/p:1;
             meter[slot][0][f*ms[slot][0]]=l*g;meter[slot][1][f*ms[slot][1]]=r*g;
@@ -644,18 +647,19 @@ BOOL TXRunSelfCheck(void) {
         for(int f=0;f<64;f++){samples[slot][2*f]=.01f*(slot+1);samples[slot][2*f+1]=-.005f*(slot+1);}mi.buf[slot+1]=(AudioBuffer){2,sizeof(samples[slot]),samples[slot]};}
     TXRenderState mainOnly;memcpy(&mainOnly,&m,sizeof(m));mainOnly.meterEnabled=NO;
     Render(0,NULL,(AudioBufferList*)&mi,NULL,(AudioBufferList*)&mout,NULL,&m);
-    for(int slot=0;slot<6;slot++)if(fabsf(multi[slot*2]-.01f*(slot+1))>1e-6||fabsf(multi[slot*2+1]+.005f*(slot+1))>1e-6)return NO;
+    for(int slot=0;slot<6;slot++)if(fabsf(multi[slot*2]-.0141253754f*(slot+1))>1e-6||fabsf(multi[slot*2+1]+.0070626877f*(slot+1))>1e-6){fprintf(stderr,"USB meter +3dB gain missing: slot=%d value=%f\n",slot,multi[slot*2]);return NO;}
+    for(int slot=0;slot<6;slot++)if(fabsf(atomic_load(&m.usbPeak[slot])-.0141253754f*(slot+1))>1e-6||fabsf(atomic_load(&m.usbRMS[slot])-hypotf(.0141253754f,.0070626877f)*(slot+1)/sqrtf(2))>1e-6)return NO;
     if(fabsf(multi[12]-.28f)>1e-6)return NO; // Remainder reaches only primary output.
     mi.buf[0].mData=NULL;Render(0,NULL,(AudioBufferList*)&mi,NULL,(AudioBufferList*)&mout,NULL,&m);
-    if(atomic_load(&m.layoutFault)||fabsf(multi[0]-.01f)>1e-6||fabsf(multi[12]-.28f)>1e-6)return NO;
+    if(atomic_load(&m.layoutFault)||fabsf(multi[0]-.0141253754f)>1e-6||fabsf(multi[12]-.28f)>1e-6)return NO;
     float primaryL=multi[12],primaryR=multi[13];
     Render(0,NULL,(AudioBufferList*)&mi,NULL,(AudioBufferList*)&mout,NULL,&mainOnly);
     if(multi[12]!=primaryL||multi[13]!=primaryR)return NO; // Mirror does not change main DSP.
     atomic_store(&m.master,.5f);m.smoothMaster=.5f;atomic_store(&m.gain[0],.5f);m.smoothGain[0]=.5f;
     atomic_store(&m.eq[0][1],18);m.currentEQ[0][1]=18;SetFilter(&m.filters[0][1],1,18,48000);
-    float expectedEQ=.01f*.25f*m.filters[0][1].b0;
+    float expectedEQ=.0141253754f*.25f*m.filters[0][1].b0;
     Render(0,NULL,(AudioBufferList*)&mi,NULL,(AudioBufferList*)&mout,NULL,&m);
-    if(fabsf(multi[0]-expectedEQ)>1e-6||fabsf(multi[2]-.01f)>1e-6)return NO;
+    if(fabsf(multi[0]-expectedEQ)>1e-6||fabsf(multi[2]-.0141253754f)>1e-6)return NO;
     atomic_store(&m.master,1);m.smoothMaster=1;atomic_store(&m.gain[0],1);m.smoothGain[0]=1;
     atomic_store(&m.eq[0][1],0);m.currentEQ[0][1]=0;memset(&m.filters[0][1],0,sizeof(TXFilter));SetFilter(&m.filters[0][1],1,0,48000);
     m.tapCount=2;m.tapSlots[0]=0;m.tapSlots[1]=6;mi.count=3;mi.buf[2]=(AudioBuffer){2,sizeof(samples[6]),samples[6]};
@@ -679,6 +683,15 @@ BOOL TXRunSelfCheck(void) {
         for(int c=0;c<12;c++)if(c!=2&&c!=3&&multi[f*14+c]!=0)return NO;
     }
     if(atomic_load(&m.usbPeak[1])<=0||atomic_load(&m.usbRMS[1])<=0||atomic_load(&m.usbPeak[0])!=0)return NO;
+    double referenceDB[]={-18,-9,-3};
+    for(int step=0;step<3;step++){
+        m.meterReferenceFrame=(uint64_t)48000*4*step+1000;
+        Render(0,NULL,(AudioBufferList*)&mi,NULL,(AudioBufferList*)&mout,NULL,&m);
+        for(int f=0;f<64;f++){
+            float expected=pow(10,referenceDB[step]/20)*sin(2*M_PI*440*(48000*4*step+1000+f)/48000);
+            if(fabsf(multi[f*14+2]-expected)>1e-6||multi[f*14+2]!=multi[f*14+3]||fabsf(multi[f*14+12]-.07f)>1e-6)return NO;
+        }
+    }
     // Main, monitor, and USB mirror share one source-processing pass.
     TXRenderState routed={0};routed.sampleRate=48000;routed.tapCount=2;routed.tapSlots[0]=0;routed.tapSlots[1]=6;
     routed.outputLeft=0;routed.outputRight=1;routed.monitorEnabled=YES;routed.monitorLeft=2;routed.monitorRight=3;
@@ -690,42 +703,42 @@ BOOL TXRunSelfCheck(void) {
     struct{UInt32 count;AudioBuffer buf[2];} ri={2,{{2,sizeof(source),source},{2,sizeof(remainder),remainder}}};
     struct{UInt32 count;AudioBuffer buf[3];} ro={3,{{2,64*2*sizeof(float),buses},{2,64*2*sizeof(float),buses+128},{12,64*12*sizeof(float),buses+256}}};
     UInt32 routeCases[]={TXOutputMain,TXOutputMonitor,TXOutputBoth,TXOutputOff,UINT32_MAX};
-    float mainCases[]={.3f,.2f,.3f,.2f,.2f},monitorCases[]={0,.1f,.1f,0,0},mirrorCases[]={.1f,.1f,.1f,0,0};
+    float mainCases[]={.3f,.2f,.3f,.2f,.2f},monitorCases[]={0,.1f,.1f,0,0},mirrorCases[]={.141253754f,.141253754f,.141253754f,0,0};
     for(int i=0;i<5;i++){
         atomic_store(&routed.route[0],routeCases[i]);Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
         for(int f=0;f<64;f++){
-            if(fabsf(buses[2*f]-mainCases[i])>1e-6||fabsf(buses[2*f+1]+mainCases[i]*.5f)>1e-6||fabsf(buses[128+2*f]-monitorCases[i])>1e-6||fabsf(buses[129+2*f]+monitorCases[i]*.5f)>1e-6||fabsf(buses[256+12*f]-mirrorCases[i])>1e-6)return NO;
+            if(fabsf(buses[2*f]-mainCases[i])>1e-6||fabsf(buses[2*f+1]+mainCases[i]*.5f)>1e-6||fabsf(buses[128+2*f]-monitorCases[i])>1e-6||fabsf(buses[129+2*f]+monitorCases[i]*.5f)>1e-6||fabsf(buses[256+12*f]-mirrorCases[i])>1e-6||fabsf(buses[257+12*f]+mirrorCases[i]*.5f)>1e-6)return NO;
             for(int c=2;c<12;c++)if(buses[256+12*f+c]!=0)return NO;
         }
     }
     atomic_store(&routed.route[0],TXOutputMonitor);
     atomic_store(&routed.monitorGain,1);
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
-    if(fabsf(buses[128]-.1f)>1e-6||fabsf(buses[256]-.1f)>1e-6)return NO;
+    if(fabsf(buses[128]-.1f)>1e-6||fabsf(buses[256]-.141253754f)>1e-6)return NO;
     atomic_store(&routed.monitorGain,0);
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
     for(int f=0;f<64;f++)if(fabsf(buses[2*f]-.2f)>1e-6||fabsf(buses[2*f+1]+.1f)>1e-6||buses[128+2*f]!=0||buses[129+2*f]!=0||buses[256+12*f]!=0||buses[257+12*f]!=0)return NO;
     atomic_store(&routed.monitorGain,.01f);
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
     for(int f=0;f<64;f++){
-        if(fabsf(buses[2*f]-.2f)>1e-6||fabsf(buses[2*f+1]+.1f)>1e-6||fabsf(buses[128+2*f])>.001000001f||fabsf(buses[129+2*f])>.000500001f||fabsf(buses[256+12*f])>.001000001f||fabsf(buses[257+12*f])>.000500001f){
+        if(fabsf(buses[2*f]-.2f)>1e-6||fabsf(buses[2*f+1]+.1f)>1e-6||fabsf(buses[128+2*f])>.001000001f||fabsf(buses[129+2*f])>.000500001f||fabsf(buses[256+12*f])>.001412539f||fabsf(buses[257+12*f])>.000706270f){
             fprintf(stderr,"Monitor trim zero recovery exceeded .01: monitor=%f mirror=%f\n",buses[128+2*f],buses[256+12*f]);return NO;
         }
     }
     float firstRecovery=.001f*(1-expf(-1/(.015f*48000)));
-    if(fabsf(buses[128]-firstRecovery)>1e-9||fabsf(buses[256]-firstRecovery)>1e-9||buses[254]<=buses[128]||atomic_load(&routed.monitorPeak)>.001000001f||atomic_load(&routed.usbPeak[0])>.001000001f)return NO;
+    if(fabsf(buses[128]-firstRecovery)>1e-9||fabsf(buses[256]-firstRecovery*1.41253754f)>1e-9||buses[254]<=buses[128]||atomic_load(&routed.monitorPeak)>.001000001f||atomic_load(&routed.usbPeak[0])>.001412539f)return NO;
     routed.monitorEnabled=NO;
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
     if(fabsf(buses[0]-.2f)>1e-6||buses[128]!=0||buses[256]!=0||atomic_load(&routed.monitorPeak)!=0)return NO;
     routed.monitorEnabled=YES;atomic_store(&routed.route[0],TXOutputBoth);atomic_store(&routed.monitorGain,.5f);routed.smoothMonitorGain=.5f;
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
-    if(fabsf(buses[0]-.3f)>1e-6||fabsf(buses[128]-.05f)>1e-6||fabsf(buses[256]-.1f)>1e-6||fabsf(atomic_load(&routed.monitorPeak)-.05f)>1e-6)return NO;
+    if(fabsf(buses[0]-.3f)>1e-6||fabsf(buses[128]-.05f)>1e-6||fabsf(buses[256]-.141253754f)>1e-6||fabsf(atomic_load(&routed.monitorPeak)-.05f)>1e-6)return NO;
     atomic_store(&routed.master,.5f);routed.smoothMaster=.5f;
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
-    if(fabsf(buses[0]-.15f)>1e-6||fabsf(buses[128]-.025f)>1e-6)return NO;
+    if(fabsf(buses[0]-.15f)>1e-6||fabsf(buses[128]-.025f)>1e-6||fabsf(buses[256]-.070626877f)>1e-6)return NO;
     atomic_store(&routed.master,1);routed.smoothMaster=1;atomic_store(&routed.route[0],TXOutputMonitor);
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
-    if(fabsf(buses[0]-.2f)>1e-6||fabsf(buses[256]-.05f)>1e-6)return NO;
+    if(fabsf(buses[0]-.2f)>1e-6||fabsf(buses[256]-.070626877f)>1e-6)return NO;
     atomic_store(&routed.monitorGain,0);
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
     if(fabsf(buses[0]-.2f)>1e-6||buses[128]!=0||buses[256]!=0)return NO;
@@ -742,6 +755,10 @@ BOOL TXRunSelfCheck(void) {
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
     if(!atomic_load(&routed.muted[0])||buses[128]!=0||fabsf(buses[0]-.2f)>1e-6)return NO;
     atomic_store(&routed.muted[0],false);routed.smoothGain[0]=1;atomic_store(&routed.route[0],TXOutputMonitor);
+    for(int f=0;f<64;f++){source[2*f]=.75f;source[2*f+1]=-.375f;}
+    Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
+    for(int f=0;f<64;f++)if(fabsf(buses[2*f]-.2f)>1e-6||fabsf(buses[128+2*f]-.75f)>1e-6||fabsf(buses[129+2*f]+.375f)>1e-6||fabsf(buses[256+12*f]-.98f)>1e-6||fabsf(buses[257+12*f]+.49f)>1e-6)return NO;
+    for(int f=0;f<64;f++){source[2*f]=.1f;source[2*f+1]=-.05f;}
     for(int f=0;f<64;f++){remainder[2*f]=8;remainder[2*f+1]=-4;}
     routed.limiterGain=1;routed.monitorLimiterGain=1;
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
@@ -760,7 +777,7 @@ BOOL TXRunSelfCheck(void) {
     for(NSNumber *trim in @[@(NAN),@-1,@2]){
         atomic_store(&routed.monitorGain,trim.floatValue);routed.smoothMonitorGain=trim.floatValue>1?1:0;
         Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
-        if(fabsf(buses[0]-.2f)>1e-6||fabsf(buses[128]-(trim.floatValue>1?.1f:0))>1e-6)return NO;
+        if(fabsf(buses[0]-.2f)>1e-6||fabsf(buses[128]-(trim.floatValue>1?.1f:0))>1e-6||fabsf(buses[256]-(trim.floatValue>1?.141253754f:0))>1e-6)return NO;
     }
     atomic_store(&routed.monitorGain,1);routed.smoothMonitorGain=1;atomic_store(&routed.route[0],TXOutputBoth);
     atomic_store(&routed.eq[0][1],18);routed.currentEQ[0][1]=18;
@@ -768,7 +785,7 @@ BOOL TXRunSelfCheck(void) {
     TXRenderState eqMain;memcpy(&eqMain,&routed,sizeof(routed));eqMain.monitorEnabled=NO;eqMain.meterEnabled=NO;
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
     float expectedFirst=.1f*routed.filters[0][1].b0;
-    if(fabsf(buses[0]-(.2f+expectedFirst))>1e-6||fabsf(buses[128]-expectedFirst)>1e-6||fabsf(buses[256]-expectedFirst)>1e-6)return NO;
+    if(fabsf(buses[0]-(.2f+expectedFirst))>1e-6||fabsf(buses[128]-expectedFirst)>1e-6||fabsf(buses[256]-expectedFirst*1.41253754f)>1e-6)return NO;
     float bothLast=buses[126];
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&eqMain);
     if(fabsf(buses[126]-bothLast)>1e-6)return NO;
