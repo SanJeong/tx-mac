@@ -5,6 +5,11 @@
 #import <math.h>
 #import <CommonCrypto/CommonDigest.h>
 
+static const double TXVolumeStep=1.0/99.0;
+static NSInteger TXVolumeValue(double gain) {return (NSInteger)llround((isfinite(gain)?fmax(0,fmin(1,gain)):0)*99);}
+static NSString *TXVolumeText(double gain) {return [NSString stringWithFormat:@"%ld",(long)TXVolumeValue(gain)];}
+static double TXVolumeGain(NSInteger value) {return fmax(0,fmin(99,value))/99.0;}
+static NSString *TXVolumeHUD(double gain) {return [@"VOLUME " stringByAppendingString:TXVolumeText(gain)];}
 static NSColor *Color(unsigned hex) { return [NSColor colorWithSRGBRed:((hex>>16)&255)/255.0 green:((hex>>8)&255)/255.0 blue:(hex&255)/255.0 alpha:1]; }
 static NSFont *Mono(CGFloat size,NSFontWeight weight) { return [NSFont monospacedSystemFontOfSize:size weight:weight]; }
 static void Text(NSString *s,NSRect frame,NSFont *font,NSColor *color,NSTextAlignment alignment) {
@@ -62,7 +67,7 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
     Text(self.connection?:@"MIDI WAIT",NSMakeRect(875,141,147,18),Mono(9,NSFontWeightMedium),light,NSTextAlignmentLeft);
     Text(self.output?:@"MAIN WAIT",NSMakeRect(875,158,147,14),Mono(9,NSFontWeightRegular),light,NSTextAlignmentLeft);
     Text(self.monitor?:@"MON OFF",NSMakeRect(875,173,147,14),Mono(9,NSFontWeightRegular),light,NSTextAlignmentLeft);
-    Text(self.muted?@"MUTE":[NSString stringWithFormat:@"%03.0f",self.master*100],NSMakeRect(873,190,104,40),Mono(33,NSFontWeightMedium),self.muted?Color(0xF36B2F):light,NSTextAlignmentLeft);
+    Text(self.muted?@"MUTE":[NSString stringWithFormat:@"%02ld",(long)TXVolumeValue(self.master)],NSMakeRect(873,190,104,40),Mono(33,NSFontWeightMedium),self.muted?Color(0xF36B2F):light,NSTextAlignmentLeft);
     [Color(self.running?0xF36B2F:0x797D71) setFill];[[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(1009,195,6,6)] fill];
     Text(self.limited?@"LIMIT":(self.running?@"AUDIO":(self.audioWaiting?@"WAIT":@"IDLE")),NSMakeRect(977,211,46,16),Mono(8,NSFontWeightMedium),light,NSTextAlignmentRight);
     [Color(0xA8ABA3) setFill];NSRectFill(NSMakeRect(24,118,1012,1));NSRectFill(NSMakeRect(24,782,1012,1));
@@ -124,29 +129,29 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
 - (BOOL)isAccessibilityElement{return YES;}
 - (NSString*)accessibilityRole{return NSAccessibilitySliderRole;}
 - (id)accessibilityValue{return @(self.value);}
-- (NSString*)accessibilityValueDescription{return [NSString stringWithFormat:@"%.0f%%",self.value*100];}
+- (NSString*)accessibilityValueDescription{return TXVolumeText(self.value);}
 - (void)setAccessibilityValue:(id)value{if(!self.enabled)return;self.value=[value doubleValue];[self sendAction:self.action to:self.target];}
 - (id)accessibilityMinValue{return @0;}
 - (id)accessibilityMaxValue{return @1;}
-- (BOOL)accessibilityPerformIncrement{if(!self.enabled)return NO;self.value+=0.01;[self sendAction:self.action to:self.target];return YES;}
-- (BOOL)accessibilityPerformDecrement{if(!self.enabled)return NO;self.value-=0.01;[self sendAction:self.action to:self.target];return YES;}
+- (BOOL)accessibilityPerformIncrement{if(!self.enabled)return NO;self.value+=TXVolumeStep;[self sendAction:self.action to:self.target];return YES;}
+- (BOOL)accessibilityPerformDecrement{if(!self.enabled)return NO;self.value-=TXVolumeStep;[self sendAction:self.action to:self.target];return YES;}
 
 - (void)setValue:(double)value{double next=isfinite(value)?fmax(0,fmin(1,value)):0;if(_value==next)return;_value=next;self.needsDisplay=YES;NSAccessibilityPostNotification(self,NSAccessibilityValueChangedNotification);}
 - (void)drawRect:(NSRect)dirty {
     if(self.rotary){NSPoint center=NSMakePoint(NSMidX(self.bounds),63);CGFloat r=46;[Color(0xECECE7) setFill];NSBezierPath *cap=[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(center.x-r,center.y-r,r*2,r*2)];[cap fill];[Color(0x747C6B) setStroke];cap.lineWidth=1.2;[cap stroke];
         NSBezierPath *ring=[NSBezierPath bezierPath];ring.lineWidth=3;[ring appendBezierPathWithArcWithCenter:center radius:r+6 startAngle:135 endAngle:405 clockwise:NO];[Color(0xA5AE9B) setStroke];[ring stroke];
-        double angle=(135+self.value*270)*M_PI/180;NSBezierPath *pointer=[NSBezierPath bezierPath];pointer.lineWidth=4;pointer.lineCapStyle=NSLineCapStyleRound;[pointer moveToPoint:center];[pointer lineToPoint:NSMakePoint(center.x+cos(angle)*(r-9),center.y+sin(angle)*(r-9))];[Color(0x252625) setStroke];[pointer stroke];Text([NSString stringWithFormat:@"%.0f%%",self.value*100],NSMakeRect(0,127,self.bounds.size.width,22),Mono(15,NSFontWeightMedium),Color(0x252625),NSTextAlignmentCenter);return;}
+        double angle=(135+self.value*270)*M_PI/180;NSBezierPath *pointer=[NSBezierPath bezierPath];pointer.lineWidth=4;pointer.lineCapStyle=NSLineCapStyleRound;[pointer moveToPoint:center];[pointer lineToPoint:NSMakePoint(center.x+cos(angle)*(r-9),center.y+sin(angle)*(r-9))];[Color(0x252625) setStroke];[pointer stroke];Text(TXVolumeText(self.value),NSMakeRect(0,127,self.bounds.size.width,22),Mono(15,NSFontWeightMedium),Color(0x252625),NSTextAlignmentCenter);return;}
     CGFloat x=NSMidX(self.bounds)-7,top=17,bottom=self.bounds.size.height-33,height=bottom-top;
     [Color(0x555B51) setFill];[[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(x-2,top,4,height) xRadius:2 yRadius:2] fill];
     for(int i=0;i<=10;i++){CGFloat y=top+height*i/10;[Color(0xA3A89C) setFill];NSRectFill(NSMakeRect(x-13,y,5,1));if(i%5==0)Text(i==0?@"0":(i==5?@"−6":@"−∞"),NSMakeRect(x-40,y-6,24,14),Mono(7,NSFontWeightRegular),Color(0x666B61),NSTextAlignmentRight);}
     for(int i=0;i<12;i++){BOOL lit=!self.muted&&self.peak>pow(10,(-42+i*3.5)/20);NSColor *c=lit?Color(i>9?0xF36B2F:0x73845C):Color(0xB6BBB0);[c setFill];NSRectFill(NSMakeRect(x+24,bottom-7-i*(height-7)/12,5,6));}
     CGFloat y=top+(1-self.value)*height;[Color(self.muted||!self.enabled?0xB7BBB0:0xECECE7) setFill];NSBezierPath *cap=[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(x-12,y-10,25,20) xRadius:2 yRadius:2];[cap fill];[Color(0x555B51) setStroke];[cap stroke];[Color(self.awaitingPickup?0xF36B2F:0x252625) setFill];NSRectFill(NSMakeRect(x-8,y,17,2));
-    Text([NSString stringWithFormat:@"%.0f%%",self.value*100],NSMakeRect(0,self.bounds.size.height-18,self.bounds.size.width,16),Mono(11,NSFontWeightSemibold),Color(0x252625),NSTextAlignmentCenter);
+    Text(TXVolumeText(self.value),NSMakeRect(0,self.bounds.size.height-18,self.bounds.size.width,16),Mono(11,NSFontWeightSemibold),Color(0x252625),NSTextAlignmentCenter);
 }
 - (void)updateFromEvent:(NSEvent*)event{NSPoint p=[self convertPoint:event.locationInWindow fromView:nil];self.value=1-(p.y-17)/(self.bounds.size.height-50);[self sendAction:self.action to:self.target];}
 - (void)mouseDown:(NSEvent*)event{if(!self.enabled)return;if(self.rotary){NSPoint start=[self convertPoint:event.locationInWindow fromView:nil];double initial=self.value;while(YES){NSEvent *e=[self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp];if(e.type==NSEventTypeLeftMouseUp)break;NSPoint p=[self convertPoint:e.locationInWindow fromView:nil];self.value=initial+(start.y-p.y)*0.004;[self sendAction:self.action to:self.target];}return;}[self updateFromEvent:event];while(YES){NSEvent *e=[self.window nextEventMatchingMask:NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp];if(e.type==NSEventTypeLeftMouseUp)break;[self updateFromEvent:e];}}
-- (void)scrollWheel:(NSEvent*)event{if(!self.enabled)return;self.value+=event.scrollingDeltaY*(event.hasPreciseScrollingDeltas?0.001:0.02);[self sendAction:self.action to:self.target];}
-- (void)keyDown:(NSEvent*)event{if(!self.enabled)return;if(event.keyCode==126||event.keyCode==124)self.value+=0.01;else if(event.keyCode==125||event.keyCode==123)self.value-=0.01;else{[super keyDown:event];return;}[self sendAction:self.action to:self.target];}
+- (void)scrollWheel:(NSEvent*)event{if(!self.enabled)return;self.value+=event.scrollingDeltaY*(event.hasPreciseScrollingDeltas?0.001:2*TXVolumeStep);[self sendAction:self.action to:self.target];}
+- (void)keyDown:(NSEvent*)event{if(!self.enabled)return;if(event.keyCode==126||event.keyCode==124)self.value+=TXVolumeStep;else if(event.keyCode==125||event.keyCode==123)self.value-=TXVolumeStep;else{[super keyDown:event];return;}[self sendAction:self.action to:self.target];}
 @end
 
 @interface TXMonitorSliderCell:NSSliderCell
@@ -161,13 +166,21 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
     [Color(0x252625) setFill];NSRectFill(NSMakeRect(NSMidX(cap)-1,NSMidY(cap)-5,2,10));
 }
 @end
-@interface TXMonitorSlider:NSSlider
+@interface TXVolumeSlider:NSSlider
+@end
+@implementation TXVolumeSlider
+- (NSString*)accessibilityValueDescription {return TXVolumeText(self.doubleValue);}
+- (void)changeVolumeBy:(double)delta {self.doubleValue=fmax(self.minValue,fmin(self.maxValue,self.doubleValue+delta));[self sendAction:self.action to:self.target];}
+- (BOOL)accessibilityPerformIncrement {if(!self.enabled)return NO;[self changeVolumeBy:TXVolumeStep];return YES;}
+- (BOOL)accessibilityPerformDecrement {if(!self.enabled)return NO;[self changeVolumeBy:-TXVolumeStep];return YES;}
+- (void)keyDown:(NSEvent*)event {if(!self.enabled)return;if(event.keyCode==126||event.keyCode==124)[self changeVolumeBy:TXVolumeStep];else if(event.keyCode==125||event.keyCode==123)[self changeVolumeBy:-TXVolumeStep];else [super keyDown:event];}
+@end
+@interface TXMonitorSlider:TXVolumeSlider
 @end
 @implementation TXMonitorSlider
 - (instancetype)initWithFrame:(NSRect)frame {
     if((self=[super initWithFrame:frame])){self.cell=[TXMonitorSliderCell new];self.minValue=0;self.maxValue=1;self.continuous=YES;self.sliderType=NSSliderTypeLinear;self.vertical=NO;}return self;
 }
-- (NSString*)accessibilityValueDescription {return [NSString stringWithFormat:@"%.0f%%",self.doubleValue*100];}
 @end
 
 @interface TXChannel:NSView
@@ -284,6 +297,10 @@ static float TXSavedMonitorGain(id value) {
 }
 static NSArray<NSString*> *TXRouteTitles(void) {return @[TXL(@"메인"),TXL(@"미리 듣기"),TXL(@"둘 다"),TXL(@"끔")];}
 static BOOL TXRunUIModelSelfCheck(void) {
+    if(![TXVolumeText(0) isEqual:@"0"]||![TXVolumeText(.5) isEqual:@"50"]||![TXVolumeText(1) isEqual:@"99"]||TXVolumeGain(99)!=1||fabs(TXVolumeGain(25)-25.0/99)>1e-12||![TXVolumeHUD(1) isEqual:@"VOLUME 99"])return NO;
+    TXFader *volume=[TXFader new];volume.value=98.0/99;[volume accessibilityPerformIncrement];if(fabs(volume.value-1)>1e-12||![volume.accessibilityValueDescription isEqual:@"99"])return NO;
+    NSEvent *left=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil characters:@"" charactersIgnoringModifiers:@"" isARepeat:NO keyCode:123];[volume keyDown:left];if(fabs(volume.value-98.0/99)>1e-12)return NO;
+    TXVolumeSlider *menuVolume=[TXVolumeSlider new];menuVolume.minValue=0;menuVolume.maxValue=1;menuVolume.doubleValue=0;[menuVolume accessibilityPerformIncrement];if(fabs(menuVolume.doubleValue-TXVolumeStep)>1e-12)return NO;[menuVolume accessibilityPerformDecrement];if(menuVolume.doubleValue!=0)return NO;menuVolume.doubleValue=1;[menuVolume keyDown:left];if(fabs(menuVolume.doubleValue-98.0/99)>1e-12)return NO;menuVolume.doubleValue=1;if(![menuVolume.accessibilityValueDescription isEqual:@"99"])return NO;
     NSDictionary *studioA=@{@"name":@"Studio Display",@"uid":@"studioA"},*studioB=@{@"name":@"Studio Display",@"uid":@"studioB"},*unique=@{@"name":@"USB Headphones",@"uid":@"headphones"};NSArray *ordered=@[studioA,studioB,unique],*reversed=@[unique,studioB,studioA];
     if(![TXOutputDeviceTitle(studioA,ordered) isEqual:@"Studio Display · EC30F4"]||![TXOutputDeviceTitle(studioB,ordered) isEqual:@"Studio Display · ACF72A"]||![TXOutputDeviceTitle(unique,ordered) isEqual:@"USB Headphones"]||![TXOutputDeviceTitle(studioA,@[studioA]) isEqual:@"Studio Display"])return NO;
     for(NSDictionary *device in ordered)if(![TXOutputDeviceTitle(device,ordered) isEqual:TXOutputDeviceTitle(device,reversed)])return NO;
@@ -523,9 +540,9 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     _autoButton.frame=NSMakeRect(18,473,364,24);_pickupButton.frame=NSMakeRect(18,437,324,24);_invertButton.frame=NSMakeRect(18,401,324,24);[settings.view addSubview:_autoButton];[settings.view addSubview:_pickupButton];[settings.view addSubview:_invertButton];_hudButton=[NSButton checkboxWithTitle:TXL(@"조절 시 상태 표시") target:self action:@selector(settingsChanged:)];_hudButton.frame=NSMakeRect(18,365,324,24);_hudButton.state=_hudEnabled?NSControlStateValueOn:NSControlStateValueOff;[settings.view addSubview:_hudButton];
     _deviceContextLabel=Label(TXL(@"TX-6 홈 화면 확인 필요"),NSMakeRect(18,311,324,40),11,NO);_deviceContextLabel.maximumNumberOfLines=2;_deviceContextLabel.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:_deviceContextLabel];
     _resumeDeviceButton=Button(TXL(@"기기 홈 화면 확인 · TX-6 제어 재개"),NSMakeRect(18,276,324,29),self,@selector(resumeDeviceControls:));[settings.view addSubview:_resumeDeviceButton];
-    [settings.view addSubview:Label(TXL(@"기기 현재 메인 숫자와 맞추기 (0~100)"),NSMakeRect(18,243,324,22),11,NO)];
-    _calibrationInput=[[NSTextField alloc] initWithFrame:NSMakeRect(18,207,99,27)];_calibrationInput.placeholderString=@"0–100";_calibrationInput.font=Mono(12,NSFontWeightMedium);_calibrationInput.alignment=NSTextAlignmentCenter;_calibrationInput.target=self;_calibrationInput.action=@selector(calibrateMaster:);_calibrationInput.accessibilityLabel=TXL(@"TX-6 현재 메인 숫자 0부터 100");[settings.view addSubview:_calibrationInput];
-    [settings.view addSubview:Button(TXL(@"맥 전체 음량에 맞춤"),NSMakeRect(130,207,212,28),self,@selector(calibrateMaster:))];NSTextField *calibrationNote=Label(TXL(@"입력한 숫자를 맥 전체 음량 %로 설정합니다.\n기기 자동 조회·상시 동기화 기능은 아닙니다."),NSMakeRect(18,151,324,46),10,NO);calibrationNote.maximumNumberOfLines=2;calibrationNote.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:calibrationNote];[settings.view addSubview:Label(TXL(@"CH 01 시스템 사운드 고정 · CH 02–06 앱 / 탭"),NSMakeRect(18,109,324,24),10,NO)];_browserLabel=Label(TXL(@"Chrome 탭: 확장 아이콘에서 연결"),NSMakeRect(18,20,324,64),11,NO);_browserLabel.maximumNumberOfLines=2;_browserLabel.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:_browserLabel];
+    [settings.view addSubview:Label(TXL(@"기기 현재 메인 숫자와 맞추기 (0~99)"),NSMakeRect(18,243,324,22),11,NO)];
+    _calibrationInput=[[NSTextField alloc] initWithFrame:NSMakeRect(18,207,99,27)];_calibrationInput.placeholderString=@"0–99";_calibrationInput.font=Mono(12,NSFontWeightMedium);_calibrationInput.alignment=NSTextAlignmentCenter;_calibrationInput.target=self;_calibrationInput.action=@selector(calibrateMaster:);_calibrationInput.accessibilityLabel=TXL(@"TX-6 현재 메인 숫자 0부터 99");[settings.view addSubview:_calibrationInput];
+    [settings.view addSubview:Button(TXL(@"맥 전체 음량에 맞춤"),NSMakeRect(130,207,212,28),self,@selector(calibrateMaster:))];NSTextField *calibrationNote=Label(TXL(@"입력한 숫자를 맥 전체 음량(0~99)으로 설정합니다.\n기기 자동 조회·상시 동기화 기능은 아닙니다."),NSMakeRect(18,151,324,46),10,NO);calibrationNote.maximumNumberOfLines=2;calibrationNote.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:calibrationNote];[settings.view addSubview:Label(TXL(@"CH 01 시스템 사운드 고정 · CH 02–06 앱 / 탭"),NSMakeRect(18,109,324,24),10,NO)];_browserLabel=Label(TXL(@"Chrome 탭: 확장 아이콘에서 연결"),NSMakeRect(18,20,324,64),11,NO);_browserLabel.maximumNumberOfLines=2;_browserLabel.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:_browserLabel];
     // Keep settings reachable on smaller displays as the optional hardware section grows.
     NSView *settingsDocument=settings.view;for(NSView *child in settingsDocument.subviews){NSRect frame=child.frame;frame.origin.y+=92;child.frame=frame;}settingsDocument.frame=NSMakeRect(0,0,400,884);
     _transportMenu=[[TXPopup alloc] initWithFrame:NSMakeRect(18,800,200,28) pullsDown:NO];for(NSArray *v in @[@[TXL(@"MIDI 자동"),@"auto"],@[@"USB MIDI",@"usb"],@[@"Bluetooth MIDI",@"ble"]]){[_transportMenu addItemWithTitle:v[0]];_transportMenu.lastItem.representedObject=v[1];}for(NSMenuItem *item in _transportMenu.itemArray)if([item.representedObject isEqual:_midi.transport])[_transportMenu selectItem:item];_transportMenu.target=self;_transportMenu.action=@selector(transportChanged:);[settingsDocument addSubview:_transportMenu];
@@ -540,9 +557,9 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     NSMenu *main=[NSMenu new],*appMenu=[NSMenu new];NSMenuItem *appItem=[NSMenuItem new];appItem.submenu=appMenu;[main addItem:appItem];[appMenu addItemWithTitle:TXL(@"TX · MAC 정보") action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];[appMenu addItem:NSMenuItem.separatorItem];NSMenuItem *preferences=[appMenu addItemWithTitle:TXL(@"설정…") action:@selector(openPreferences:) keyEquivalent:@","];preferences.target=self;NSMenuItem *guide=[appMenu addItemWithTitle:TXL(@"시작 안내 및 권한…") action:@selector(showSetup:) keyEquivalent:@""];guide.target=self;[appMenu addItem:NSMenuItem.separatorItem];[appMenu addItemWithTitle:TXL(@"TX · MAC 숨기기") action:@selector(hide:) keyEquivalent:@"h"];[appMenu addItemWithTitle:TXL(@"TX · MAC 종료") action:@selector(terminate:) keyEquivalent:@"q"];NSApp.mainMenu=main;
 }
 - (NSView*)sliderViewForSlot:(NSInteger)slot band:(NSInteger)band {
-    NSView *v=[[NSView alloc] initWithFrame:NSMakeRect(0,0,280,38)];NSSlider *slider=[NSSlider sliderWithValue:0 minValue:band<0?0:-18 maxValue:band<0?1:18 target:self action:@selector(menuSliderChanged:)];slider.frame=NSMakeRect(15,8,205,22);slider.tag=slot*10+band+1;
+    NSView *v=[[NSView alloc] initWithFrame:NSMakeRect(0,0,280,38)];NSSlider *slider=band<0?[[TXVolumeSlider alloc] initWithFrame:NSMakeRect(15,8,205,22)]:[NSSlider sliderWithValue:0 minValue:-18 maxValue:18 target:self action:@selector(menuSliderChanged:)];if(band<0){slider.minValue=0;slider.maxValue=1;slider.continuous=YES;slider.target=self;slider.action=@selector(menuSliderChanged:);}slider.frame=NSMakeRect(15,8,205,22);slider.tag=slot*10+band+1;
     slider.enabled=slot==6||[self canAdjustVolumeForSlot:slot];if(!slider.enabled)slider.toolTip=TXL(@"음소거 가능 · 음량/EQ는 Chrome 탭에서 ⌘⇧6으로 연결");slider.doubleValue=slot==6?atomic_load(&_audio.state->master):(band<0?atomic_load(&_audio.state->gain[slot]):atomic_load(&_audio.state->eq[slot][band]));[v addSubview:slider];
-    NSTextField *value=Label(band<0?[NSString stringWithFormat:@"%.0f%%",slider.doubleValue*100]:[NSString stringWithFormat:@"%+.0f",slider.doubleValue],NSMakeRect(225,11,48,18),11,YES);value.tag=999;[v addSubview:value];return v;
+    NSTextField *value=Label(band<0?TXVolumeText(slider.doubleValue):[NSString stringWithFormat:@"%+.0f",slider.doubleValue],NSMakeRect(225,11,48,18),11,YES);value.tag=999;[v addSubview:value];return v;
 }
 - (void)buildStatusItem {
     _statusItem=[[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];_statusItem.button.image=[self menuIcon];_statusItem.button.imagePosition=NSImageOnly;_statusItem.button.toolTip=TXL(@"TX · MAC — 프로그램별 음량과 EQ");
@@ -571,7 +588,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     NSMenuItem *systemOutput=[[NSMenuItem alloc] initWithTitle:[self systemOutputTitle] action:@selector(menuOutput:) keyEquivalent:@""];systemOutput.target=self;systemOutput.representedObject=@"";systemOutput.state=_followDefaultOutput?NSControlStateValueOn:NSControlStateValueOff;[outs addItem:systemOutput];[outs addItem:NSMenuItem.separatorItem];
     for(NSDictionary *d in _outputs){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:TXOutputDeviceTitle(d,_outputs) action:@selector(menuOutput:) keyEquivalent:@""];item.target=self;item.representedObject=d[@"uid"];item.state=!_followDefaultOutput&&[d[@"uid"] isEqual:_outputUID]?NSControlStateValueOn:NSControlStateValueOff;[outs addItem:item];}[menu addItem:output];
     NSMenuItem *monitor=[[NSMenuItem alloc] initWithTitle:TXL(@"미리 듣기 출력 장치") action:nil keyEquivalent:@""];NSMenu *monitorDevices=[NSMenu new];monitor.submenu=monitorDevices;NSMenuItem *off=[[NSMenuItem alloc] initWithTitle:TXL(@"끔") action:@selector(menuMonitor:) keyEquivalent:@""];off.target=self;off.representedObject=@"";off.state=!_monitorUID.length?NSControlStateValueOn:NSControlStateValueOff;[monitorDevices addItem:off];for(NSDictionary *device in _outputs){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:TXOutputDeviceTitle(device,_outputs) action:@selector(menuMonitor:) keyEquivalent:@""];item.target=self;item.representedObject=device[@"uid"];item.state=[device[@"uid"] isEqual:_monitorUID]?NSControlStateValueOn:NSControlStateValueOff;[monitorDevices addItem:item];}if(_monitorUID.length&&![self selectedMonitor]){NSMenuItem *offline=[[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:TXL(@"%@ (연결 안 됨)"),_monitorName?:_monitorUID] action:nil keyEquivalent:@""];offline.state=NSControlStateValueOn;[monitorDevices addItem:offline];}[menu addItem:monitor];
-    NSMenuItem *trim=[[NSMenuItem alloc] initWithTitle:TXL(@"미리 듣기 음량") action:nil keyEquivalent:@""];NSMenu *levels=[NSMenu new];trim.submenu=levels;for(NSNumber *level in @[@0,@25,@50,@75,@100]){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:[NSString stringWithFormat:@"%@%%",level] action:@selector(menuMonitorGain:) keyEquivalent:@""];item.target=self;item.tag=level.integerValue;item.state=fabs(atomic_load(&_audio.state->monitorGain)*100-level.doubleValue)<.01?NSControlStateValueOn:NSControlStateValueOff;[levels addItem:item];}[menu addItem:trim];
+    NSMenuItem *trim=[[NSMenuItem alloc] initWithTitle:TXL(@"미리 듣기 음량") action:nil keyEquivalent:@""];NSMenu *levels=[NSMenu new];trim.submenu=levels;for(NSNumber *level in @[@0,@25,@50,@75,@99]){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:level.stringValue action:@selector(menuMonitorGain:) keyEquivalent:@""];item.target=self;item.tag=level.integerValue;item.state=fabs(atomic_load(&_audio.state->monitorGain)-TXVolumeGain(level.integerValue))<.000001?NSControlStateValueOn:NSControlStateValueOff;[levels addItem:item];}[menu addItem:trim];
     for(NSArray *entry in @[@[TXL(@"믹서 창 열기"),NSStringFromSelector(@selector(showWindow:))],@[TXL(@"Bluetooth 연결…"),NSStringFromSelector(@selector(showBluetooth:))],@[_desiredRunning?TXL(@"믹서 중지 · 원음 복구"):TXL(@"믹서 시작"),NSStringFromSelector(@selector(toggleMixer:))]]){NSMenuItem *item=[[NSMenuItem alloc] initWithTitle:entry[0] action:NSSelectorFromString(entry[1]) keyEquivalent:@""];item.target=self;[menu addItem:item];}
     [menu addItem:NSMenuItem.separatorItem];NSMenuItem *quit=[[NSMenuItem alloc] initWithTitle:TXL(@"종료 · 원음 복구") action:@selector(terminate:) keyEquivalent:@"q"];[menu addItem:quit];
 }
@@ -865,8 +882,13 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     if(!until(^BOOL{return app->_audioReady&&!app->_halBusy;})||!app->_monitoring||backend.monitorOutputDevice!=4||![app->_signature isEqual:latest]||![[app selectedMonitor][@"name"] isEqual:@"Monitor D"]||app->_monitorError.length)return NO;
     before=backend.starts;NSUInteger generation=app->_halGeneration;NSString *unchanged=[app currentSignature];[app setRoute:TXOutputMonitor slot:0];TXMonitorSlider *trim=[[TXMonitorSlider alloc] initWithFrame:NSMakeRect(865,620,167,22)];trim.doubleValue=.25;trim.target=app;trim.action=@selector(monitorGainChanged:);app->_monitorSlider=trim;app->_monitorLevelLabel=Label(@"",NSZeroRect,9,YES);[app monitorGainChanged:trim];
     if(backend.starts!=before||app->_halGeneration!=generation||![unchanged isEqual:[app currentSignature]]||atomic_load(&backend.state->route[0])!=TXOutputMonitor||atomic_load(&backend.state->monitorGain)!=.25)return NO;
-    if(trim.minValue!=0||trim.maxValue!=1||![trim.cell isKindOfClass:TXMonitorSliderCell.class]||![trim.accessibilityValueDescription isEqual:@"25%"]||![app->_monitorLevelLabel.stringValue isEqual:@"25%"]||trim.target!=app||trim.action!=@selector(monitorGainChanged:))return NO;
-    trim.doubleValue=1;if(![trim.accessibilityValueDescription isEqual:@"100%"])return NO;trim.doubleValue=0;if(![trim.accessibilityValueDescription isEqual:@"0%"])return NO;trim.doubleValue=.25;app->_monitorUID=@"";[app updateMonitorLevel];if(![trim.toolTip isEqual:[NSString stringWithFormat:TXL(@"미리 듣기 출력 꺼짐 · 저장된 음량 %@"),@"25%"]]||backend.starts!=before||app->_halGeneration!=generation||atomic_load(&backend.state->route[0])!=TXOutputMonitor||atomic_load(&backend.state->monitorGain)!=.25)return NO;
+    if(trim.minValue!=0||trim.maxValue!=1||![trim.cell isKindOfClass:TXMonitorSliderCell.class]||![trim.accessibilityValueDescription isEqual:@"25"]||![app->_monitorLevelLabel.stringValue isEqual:@"25"]||trim.target!=app||trim.action!=@selector(monitorGainChanged:))return NO;
+    trim.doubleValue=1;if(![trim.accessibilityValueDescription isEqual:@"99"])return NO;trim.doubleValue=0;if(![trim.accessibilityValueDescription isEqual:@"0"])return NO;trim.doubleValue=.25;app->_monitorUID=@"";[app updateMonitorLevel];if(![trim.toolTip isEqual:[NSString stringWithFormat:TXL(@"미리 듣기 출력 꺼짐 · 저장된 음량 %@"),@"25"]]||backend.starts!=before||app->_halGeneration!=generation||atomic_load(&backend.state->route[0])!=TXOutputMonitor||atomic_load(&backend.state->monitorGain)!=.25)return NO;
+    NSMenuItem *preset=[NSMenuItem new];for(NSNumber *level in @[@0,@25,@50,@75,@99]){preset.tag=level.integerValue;[app menuMonitorGain:preset];if(fabs(atomic_load(&backend.state->monitorGain)-level.doubleValue/99)>1e-7||![trim.accessibilityValueDescription isEqual:level.stringValue])return NO;}if(atomic_load(&backend.state->monitorGain)!=1)return NO;
+    app->_calibrationInput=[NSTextField new];app->_calibrationInput.stringValue=@"99";[app calibrateMaster:nil];if(atomic_load(&backend.state->master)!=1)return NO;atomic_store(&backend.state->master,.37f);app->_calibrationInput.stringValue=@"100";[app calibrateMaster:nil];if(fabs(atomic_load(&backend.state->master)-.37)>1e-7)return NO;app->_calibrationInput.stringValue=@"50";[app calibrateMaster:nil];if(fabs(atomic_load(&backend.state->master)-50.0/99)>1e-7)return NO;
+    atomic_store(&backend.state->master,0);[app handleMIDI:@"fixture" channel:0 cc:31 value:1];if(fabs(atomic_load(&backend.state->master)-TXVolumeStep)>1e-7)return NO;[app handleMIDI:@"fixture" channel:0 cc:31 value:127];if(fabs(atomic_load(&backend.state->master))>1e-7)return NO;[app handleMIDI:@"fixture" channel:0 cc:1 value:127];if(atomic_load(&backend.state->gain[0])!=1)return NO;
+    NSView *masterMenu=[app sliderViewForSlot:6 band:-1];NSSlider *masterSlider=(NSSlider*)masterMenu.subviews.firstObject;atomic_store(&backend.state->master,1);masterSlider.doubleValue=1;[app menuSliderChanged:masterSlider];if(![masterSlider.accessibilityValueDescription isEqual:@"99"]||![[(NSTextField*)[masterMenu viewWithTag:999] stringValue] isEqual:@"99"]||atomic_load(&backend.state->master)!=1||backend.starts!=before||app->_halGeneration!=generation)return NO;
+    printf("TX6Mac volume 0-99 scale, controls and unity mapping: PASS\n");
     app->_monitorUID=usb[@"uid"];if([app usbMeterDevice])return NO;
     app->_desiredRunning=NO;[app stopAudio];if(!until(^BOOL{return !app->_halBusy;})||app->_monitoring||backend.usedMain)return NO;
     app->_desiredRunning=YES;app->_usbMeters=NO;app->_monitorUID=@"fixtureA";backend.liveUIDs=@{@1:@"recycled-speaker"};before=backend.starts;[app rebuildAudio];
@@ -928,7 +950,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     NSString *monitorStatus=!_monitorUID.length?TXL(@"끔"):(_monitoring&&_audioReady?([self selectedMonitor][@"name"]?:_monitorName):[NSString stringWithFormat:TXL(@"%@ · 대기"),_monitorName.length?_monitorName:_monitorUID]);_canvas.monitor=[@"MON · " stringByAppendingString:monitorStatus];_canvas.toolTip=[NSString stringWithFormat:@"MAIN · %@\nMONITOR · %@%@",[self selectedOutput][@"name"]?:TXL(@"연결 대기"),monitorStatus,_monitorError.length?[@" · " stringByAppendingString:_monitorError]:@""];[self updateOutputDeviceHelp];_canvas.needsDisplay=YES;
     _browserLabel.stringValue=_browser.connected?TXL(@"Chrome 오디오 탭 자동 감지 · 음소거 바로 가능\n개별 음량·EQ는 해당 탭에서 ⌘⇧6으로 연결"):TXL(@"Chrome 확장을 연결하면 재생 탭 자동 감지\n개별 음량·EQ 연결 단축키: ⌘⇧6");_remainderLabel.stringValue=_overflowCount>0?[NSString stringWithFormat:TXL(@"추가 %ld개 앱은 MASTER 적용"),(long)_overflowCount]:TXL(@"미지정 앱도 MASTER 적용");_masterFader.value=atomic_load(&s->master);_masterMute.state=atomic_load(&s->masterMuted)?NSControlStateValueOn:NSControlStateValueOff;_startButton.title=_desiredRunning?TXL(@"믹서 중지"):TXL(@"믹서 시작");
     _resumeDeviceButton.enabled=_midi.sources.count&&(_deviceContext.suspended||_deviceContext.shiftDown);_deviceContextLabel.stringValue=!_midi.sources.count?TXL(@"MIDI 연결 대기"):(_deviceContext.suspended||_deviceContext.shiftDown)?(_deviceContext.reason?TXL(@"기기 메뉴 조작 중 · 맥 제어 일시정지\nSHIFT를 단독으로 눌렀다 떼면 홈 제어 재개"):TXL(@"기기 홈 화면 확인 필요 · 맥 제어 일시정지\nSHIFT를 단독으로 눌렀다 떼면 홈 제어 재개")):TXL(@"TX-6 홈 화면 제어 중\n메뉴 진입 신호가 오면 맥 조절을 보호합니다.");
-    _statusItem.button.toolTip=[NSString stringWithFormat:@"TX · MAC · %@ · %.0f%%",_audioReady?TXL(@"실행"):TXL(@"대기"),atomic_load(&s->master)*100];
+    _statusItem.button.toolTip=[NSString stringWithFormat:@"TX · MAC · %@ · %@",_audioReady?TXL(@"실행"):TXL(@"대기"),TXVolumeText(atomic_load(&s->master))];
 }
 - (void)writeStatusNow {_lastStatusWrite=nil;[self writeStatus];}
 - (void)writeStatus {
@@ -941,7 +963,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (void)selectMonitorPreference:(NSString*)uid {_monitorUID=uid?:@"";_monitorName=[self selectedMonitor][@"name"]?:_monitorUID;_monitorError=@"";_outputMenuSignature=nil;[self refreshDeviceMenus];[self saveSettings];if(_desiredRunning){_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;[self rebuildAudio];}[self updateStatus];[self writeStatusNow];}
 - (void)monitorChanged:(NSPopUpButton*)sender {[self selectMonitorPreference:sender.selectedItem.representedObject];}
 - (void)updateMonitorLevel {
-    NSString *value=[NSString stringWithFormat:@"%.0f%%",atomic_load(&_audio.state->monitorGain)*100];_monitorLevelLabel.stringValue=value;_monitorSlider.toolTip=[NSString stringWithFormat:_monitorUID.length?TXL(@"미리 듣기 음량 %@"):TXL(@"미리 듣기 출력 꺼짐 · 저장된 음량 %@"),value];_monitorLevelLabel.toolTip=_monitorSlider.toolTip;
+    NSString *value=TXVolumeText(atomic_load(&_audio.state->monitorGain));_monitorLevelLabel.stringValue=value;_monitorSlider.toolTip=[NSString stringWithFormat:_monitorUID.length?TXL(@"미리 듣기 음량 %@"):TXL(@"미리 듣기 출력 꺼짐 · 저장된 음량 %@"),value];_monitorLevelLabel.toolTip=_monitorSlider.toolTip;
 }
 - (void)monitorGainChanged:(NSSlider*)sender {atomic_store(&_audio.state->monitorGain,fmax(0,fmin(1,sender.doubleValue)));_monitorSlider.doubleValue=atomic_load(&_audio.state->monitorGain);[self updateMonitorLevel];[self saveSettings];[self writeStatusNow];}
 - (void)setRoute:(UInt32)route slot:(NSInteger)slot {if(slot<0||slot>=6||route>TXOutputOff||[_assignments[slot] hasPrefix:@"chrome-tab:"])return;atomic_store(&_audio.state->route[slot],route);[_channels[slot].route selectItemAtIndex:route];_channels[slot].route.accessibilityValue=TXRouteTitles()[route];[self showHUDForSlot:slot message:TXRouteTitles()[route]];[self saveSettings];[self writeStatusNow];}
@@ -949,9 +971,9 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (void)outputChanged:(NSPopUpButton*)sender {[self selectOutputPreference:sender.selectedItem.representedObject];}
 - (void)transportChanged:(NSPopUpButton*)sender {_midi.transport=sender.selectedItem.representedObject;[_midi refresh];[self saveSettings];[self updateStatus];}
 - (void)settingsChanged:(id)sender {BOOL pickup=_pickupButton.state==NSControlStateValueOn,invert=_invertButton.state==NSControlStateValueOn;if(_pickup!=pickup||_invert!=invert){_pickup=pickup;_invert=invert;for(int i=0;i<6;i++)[self clearPickupForSlot:i];}_hudEnabled=_hudButton.state==NSControlStateValueOn;if(!_hudEnabled){_pendingHUD=nil;[self hideHUD:nil];}[self saveSettings];}
-- (void)gainChanged:(TXFader*)sender {int i=(int)sender.tag;if(![self canAdjustVolumeForSlot:i]){sender.value=atomic_load(&_audio.state->gain[i]);[self showBrowserCaptureHint:i];return;}atomic_store(&_audio.state->gain[i],sender.value);_latched[i][0]=NO;sender.awaitingPickup=_pickup;[self showHUDForSlot:i message:[NSString stringWithFormat:@"VOLUME %.0f%%",sender.value*100]];[self saveSettings];}
+- (void)gainChanged:(TXFader*)sender {int i=(int)sender.tag;if(![self canAdjustVolumeForSlot:i]){sender.value=atomic_load(&_audio.state->gain[i]);[self showBrowserCaptureHint:i];return;}atomic_store(&_audio.state->gain[i],sender.value);_latched[i][0]=NO;sender.awaitingPickup=_pickup;[self showHUDForSlot:i message:TXVolumeHUD(sender.value)];[self saveSettings];}
 - (void)eqChanged:(TXKnob*)sender {int i=(int)sender.tag/3,b=(int)sender.tag%3;if(![self canAdjustVolumeForSlot:i]){sender.value=atomic_load(&_audio.state->eq[i][b]);[self showBrowserCaptureHint:i];return;}atomic_store(&_audio.state->eq[i][b],sender.value);_latched[i][b+1]=NO;sender.awaitingPickup=_pickup;[self showHUDForSlot:i message:[NSString stringWithFormat:@"%@ %+.1f dB",@[@"LOW",@"MID",@"HIGH"][b],sender.value]];[self saveSettings];}
-- (void)masterChanged:(TXFader*)sender {atomic_store(&_audio.state->master,sender.value);[self showHUDForSlot:-1 message:[NSString stringWithFormat:@"VOLUME %.0f%%",sender.value*100]];[self saveSettings];[self updateStatus];}
+- (void)masterChanged:(TXFader*)sender {atomic_store(&_audio.state->master,sender.value);[self showHUDForSlot:-1 message:TXVolumeHUD(sender.value)];[self saveSettings];[self updateStatus];}
 - (void)muteChanged:(NSButton*)sender {atomic_store(&_audio.state->muted[sender.tag],sender.state==NSControlStateValueOn);[self showHUDForSlot:sender.tag message:sender.state==NSControlStateValueOn?TXL(@"음소거"):TXL(@"음소거 해제")];[self saveSettings];}
 - (void)masterMuteChanged:(NSButton*)sender {atomic_store(&_audio.state->masterMuted,sender.state==NSControlStateValueOn);[self showHUDForSlot:-1 message:sender.state==NSControlStateValueOn?TXL(@"전체 음소거"):TXL(@"전체 음소거 해제")];[self updateStatus];}
 - (void)resetEQ:(id)sender {for(int i=0;i<6;i++)for(int b=0;b<3;b++){atomic_store(&_audio.state->eq[i][b],0);_latched[i][b+1]=NO;_channels[i].knobs[2-b].value=0;_channels[i].knobs[2-b].awaitingPickup=_pickup;}[self showHUDForSlot:-1 message:@"EQ ALL · 0 dB"];[self saveSettings];}
@@ -960,13 +982,13 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     if(slot==6){atomic_store(&_audio.state->master,sender.doubleValue);[self updateStatus];}
     else if(b<0){atomic_store(&_audio.state->gain[slot],sender.doubleValue);_channels[slot].fader.value=sender.doubleValue;_latched[slot][0]=NO;_channels[slot].fader.awaitingPickup=_pickup;}
     else {atomic_store(&_audio.state->eq[slot][b],sender.doubleValue);_channels[slot].knobs[2-b].value=sender.doubleValue;_latched[slot][b+1]=NO;_channels[slot].knobs[2-b].awaitingPickup=_pickup;}
-    NSTextField *label=[sender.superview viewWithTag:999];label.stringValue=b<0?[NSString stringWithFormat:@"%.0f%%",sender.doubleValue*100]:[NSString stringWithFormat:@"%+.0f",sender.doubleValue];[self showHUDForSlot:slot==6?-1:slot message:b<0?[NSString stringWithFormat:@"VOLUME %.0f%%",sender.doubleValue*100]:[NSString stringWithFormat:@"%@ %+.1f dB",@[@"LOW",@"MID",@"HIGH"][b],sender.doubleValue]];[self saveSettings];
+    NSTextField *label=[sender.superview viewWithTag:999];label.stringValue=b<0?TXVolumeText(sender.doubleValue):[NSString stringWithFormat:@"%+.0f",sender.doubleValue];[self showHUDForSlot:slot==6?-1:slot message:b<0?TXVolumeHUD(sender.doubleValue):[NSString stringWithFormat:@"%@ %+.1f dB",@[@"LOW",@"MID",@"HIGH"][b],sender.doubleValue]];[self saveSettings];
 }
 - (void)menuMute:(NSMenuItem*)sender {int slot=(int)sender.tag;BOOL mute=!atomic_load(&_audio.state->muted[slot]);atomic_store(&_audio.state->muted[slot],mute);_channels[slot].mute.state=mute?NSControlStateValueOn:NSControlStateValueOff;sender.state=_channels[slot].mute.state;[self showHUDForSlot:slot message:mute?TXL(@"음소거"):TXL(@"음소거 해제")];[self saveSettings];}
 - (void)masterMenuMute:(NSMenuItem*)sender {atomic_store(&_audio.state->masterMuted,!atomic_load(&_audio.state->masterMuted));sender.state=atomic_load(&_audio.state->masterMuted)?NSControlStateValueOn:NSControlStateValueOff;[self showHUDForSlot:-1 message:atomic_load(&_audio.state->masterMuted)?TXL(@"전체 음소거"):TXL(@"전체 음소거 해제")];[self updateStatus];}
 - (void)menuRoute:(NSMenuItem*)sender {[self setRoute:(UInt32)(sender.tag%4) slot:sender.tag/4];}
 - (void)menuMonitor:(NSMenuItem*)sender {[self selectMonitorPreference:sender.representedObject];}
-- (void)menuMonitorGain:(NSMenuItem*)sender {atomic_store(&_audio.state->monitorGain,sender.tag/100.0);_monitorSlider.doubleValue=sender.tag/100.0;[self updateMonitorLevel];[self saveSettings];[self writeStatusNow];}
+- (void)menuMonitorGain:(NSMenuItem*)sender {atomic_store(&_audio.state->monitorGain,TXVolumeGain(sender.tag));_monitorSlider.doubleValue=TXVolumeGain(sender.tag);[self updateMonitorLevel];[self saveSettings];[self writeStatusNow];}
 - (void)menuOutput:(NSMenuItem*)sender {[self selectOutputPreference:sender.representedObject];}
 - (void)deviceConnectionChanged {
     if(_midi.sources.count&&TXMayAutoStart(_autoStart,_audioStartConsent,_explicitStop,_sleeping)&&!_audioReady){_desiredRunning=YES;_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;[self rebuildAudio];}
@@ -980,8 +1002,8 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 }
 - (void)calibrateMaster:(id)sender {
     NSString *text=[[_calibrationInput.stringValue stringByApplyingTransform:NSStringTransformFullwidthToHalfwidth reverse:NO] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];NSScanner *scanner=[NSScanner scannerWithString:text];double number=0;
-    if(![scanner scanDouble:&number]||!scanner.isAtEnd||!isfinite(number)||number<0||number>100||floor(number)!=number){_canvas.message=TXL(@"TX-6에 표시된 현재 메인 숫자 0~100을 입력해 주세요.");[self showHUDForSlot:-1 message:TXL(@"0~100 숫자 입력")];_canvas.needsDisplay=YES;return;}
-    atomic_store(&_audio.state->master,number/100);_canvas.message=TXL(@"입력한 기기 숫자에 맥 전체 음량을 맞췄습니다. 자동 조회나 상시 동기화는 아닙니다.");[self showHUDForSlot:-1 message:[NSString stringWithFormat:@"VOLUME %.0f%%",number]];[self saveSettings];[self updateStatus];[self writeStatus];
+    if(![scanner scanDouble:&number]||!scanner.isAtEnd||!isfinite(number)||number<0||number>99||floor(number)!=number){_canvas.message=TXL(@"TX-6에 표시된 현재 메인 숫자 0~99를 입력해 주세요.");[self showHUDForSlot:-1 message:TXL(@"0~99 숫자 입력")];_canvas.needsDisplay=YES;return;}
+    atomic_store(&_audio.state->master,number/99);_canvas.message=TXL(@"입력한 기기 숫자에 맥 전체 음량을 맞췄습니다. 자동 조회나 상시 동기화는 아닙니다.");[self showHUDForSlot:-1 message:TXVolumeHUD(number/99)];[self saveSettings];[self updateStatus];[self writeStatus];
 }
 - (BOOL)consumeDeviceContextCC:(UInt8)cc value:(UInt8)value {
     BOOL wasBlocked=_deviceContext.suspended||_deviceContext.shiftDown;BOOL suppress=TXConsumeDeviceContext(&_deviceContext,cc,value);BOOL blocked=_deviceContext.suspended||_deviceContext.shiftDown;
@@ -998,10 +1020,10 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (void)handleMIDI:(NSString*)source channel:(UInt8)channel cc:(UInt8)cc value:(UInt8)value {
     _lastMIDI=[NSString stringWithFormat:@"%@ · CH %d / CC %d / %d",source,channel+1,cc,value];if(_audioError.length)_canvas.message=_audioError;
     if(channel!=0){[self updateStatus];return;}if([self consumeDeviceContextCC:cc value:value])return;TXRenderState *s=_audio.state;
-    if(cc>=1&&cc<=6){int i=cc-1;if(![self canAdjustVolumeForSlot:i]){[self showBrowserCaptureHint:i];[self writeStatus];return;}double v=(_invert?127-value:value)/127.0;BOOL hit=[self pickupValue:v slot:i parameter:0 current:atomic_load(&s->gain[i])];_channels[i].fader.awaitingPickup=!hit;if(!hit)_canvas.message=[NSString stringWithFormat:TXL(@"픽업 대기 · 트랙 %d 페이더를 %.0f%% 위치까지 움직이면 연결됩니다."),i+1,atomic_load(&s->gain[i])*100];if(hit){atomic_store(&s->gain[i],v);_channels[i].fader.value=v;}[self showHUDForSlot:i message:hit?[NSString stringWithFormat:@"VOLUME %.0f%%",v*100]:[NSString stringWithFormat:TXL(@"픽업 대기 · %.0f%%"),atomic_load(&s->gain[i])*100]];}
+    if(cc>=1&&cc<=6){int i=cc-1;if(![self canAdjustVolumeForSlot:i]){[self showBrowserCaptureHint:i];[self writeStatus];return;}double v=(_invert?127-value:value)/127.0;BOOL hit=[self pickupValue:v slot:i parameter:0 current:atomic_load(&s->gain[i])];_channels[i].fader.awaitingPickup=!hit;if(!hit)_canvas.message=[NSString stringWithFormat:TXL(@"픽업 대기 · 트랙 %d 페이더를 %.0f 위치까지 움직이면 연결됩니다."),i+1,(double)TXVolumeValue(atomic_load(&s->gain[i]))];if(hit){atomic_store(&s->gain[i],v);_channels[i].fader.value=v;}[self showHUDForSlot:i message:hit?TXVolumeHUD(v):[NSString stringWithFormat:TXL(@"픽업 대기 · %.0f"),(double)TXVolumeValue(atomic_load(&s->gain[i]))]];}
     else if(cc>=7&&cc<=24){int bank=(cc-7)/6,i=(cc-7)%6,b=2-bank;if(![self canAdjustVolumeForSlot:i]){[self showBrowserCaptureHint:i];[self writeStatus];return;}double db=abs((int)value-64)<=1?0:(value/127.0*36-18);TXKnob *k=_channels[i].knobs[bank];BOOL hit=[self pickupValue:db slot:i parameter:b+1 current:atomic_load(&s->eq[i][b])];k.awaitingPickup=!hit;if(!hit)_canvas.message=[NSString stringWithFormat:TXL(@"픽업 대기 · 트랙 %d %@ 노브를 %+.1f dB에 맞추면 연결됩니다."),i+1,k.caption,atomic_load(&s->eq[i][b])];if(hit){atomic_store(&s->eq[i][b],db);k.value=db;}[self showHUDForSlot:i message:hit?[NSString stringWithFormat:@"%@ %+.1f dB",k.caption,db]:[NSString stringWithFormat:TXL(@"%@ 픽업 · %+.1f dB"),k.caption,atomic_load(&s->eq[i][b])]];}
     else if(cc>=25&&cc<=30&&value>=64){int i=cc-25;BOOL mute=!atomic_load(&s->muted[i]);atomic_store(&s->muted[i],mute);_channels[i].mute.state=mute?NSControlStateValueOn:NSControlStateValueOff;[self showHUDForSlot:i message:mute?TXL(@"음소거"):TXL(@"음소거 해제")];}
-    else if(cc==31){int delta=value<64?value:(int)value-128;float master=fmaxf(0,fminf(1,atomic_load(&s->master)+delta*0.01));atomic_store(&s->master,master);[self showHUDForSlot:-1 message:[NSString stringWithFormat:@"VOLUME %.0f%%",master*100]];}
+    else if(cc==31){int delta=value<64?value:(int)value-128;float master=fmaxf(0,fminf(1,atomic_load(&s->master)+delta*TXVolumeStep));atomic_store(&s->master,master);[self showHUDForSlot:-1 message:TXVolumeHUD(master)];}
     else if(cc==33&&value>=64){atomic_store(&s->masterMuted,false);[self showHUDForSlot:-1 message:TXL(@"전체 음소거 해제")];}
     else if(cc==34&&value>=64){atomic_store(&s->masterMuted,true);[self showHUDForSlot:-1 message:TXL(@"전체 음소거")];}
     [self sendBrowserControls];if(cc>=25)[self updateStatus];else _canvas.needsDisplay=YES;[NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(saveSettings) object:nil];[self performSelector:@selector(saveSettings) withObject:nil afterDelay:0.4 inModes:@[NSRunLoopCommonModes]];[self writeStatus];
@@ -1020,7 +1042,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     [self buildWindow];[_window setFrame:frame display:NO];previous.delegate=nil;[previous close];_calibrationInput.stringValue=calibration;_canvas.message=@"";
     _outputMenuSignature=nil;_processMenuSignature=nil;[self refreshDeviceMenus];[self updateStatus];[self tick:nil];
     for(int i=0;i<6;i++){_channels[i].fader.awaitingPickup=_pickup&&!_latched[i][0];for(int b=0;b<3;b++)_channels[i].knobs[2-b].awaitingPickup=_pickup&&!_latched[i][b+1];}
-    if(visible)[_window makeKeyAndOrderFront:nil];_setupWindow.delegate=nil;[_setupWindow close];_setupWindow=nil;if(setupVisible)[self showSetup:nil];if(hudVisible)[self showHUDForSlot:-1 message:[NSString stringWithFormat:@"VOLUME %.0f%%",atomic_load(&_audio.state->master)*100]];[self writeStatus];
+    if(visible)[_window makeKeyAndOrderFront:nil];_setupWindow.delegate=nil;[_setupWindow close];_setupWindow=nil;if(setupVisible)[self showSetup:nil];if(hudVisible)[self showHUDForSlot:-1 message:TXVolumeHUD(atomic_load(&_audio.state->master))];[self writeStatus];
 }
 - (void)showSetup:(id)sender {
     [_settingsPopover close];if(_setupWindow){[_setupWindow makeKeyAndOrderFront:nil];return;}
