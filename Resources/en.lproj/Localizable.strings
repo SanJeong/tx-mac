@@ -226,3 +226,22 @@
 "오디오 실행 후 최고값을 초기화할 수 있습니다." = "Highest peaks can be reset while audio is running.";
 "중지" = "Stopped";
 "탭 레벨 측정 미지원" = "Tab level measurement unavailable";
+
+"Chrome 탭별 모드에서는 그룹에 포함할 수 없습니다." = "Chrome cannot join a group while individual tab mode is on.";
+"Chrome을 그룹에서 제거한 뒤 탭별 모드를 켜세요." = "Remove Chrome from its group before turning on individual tab mode.";
+"그룹 이름" = "Group name";
+"그룹 이름은 제어 문자 없이 1–32자로 입력하세요." = "Use a group name of 1–32 characters without control characters.";
+"그룹 해제" = "Ungroup";
+"다른 채널의 앱 또는 Chrome 탭 모드와 충돌합니다. 배정을 확인하세요." = "This conflicts with another channel or Chrome tab mode. Check the assignments.";
+"선택한 앱은 이 채널의 음량·EQ·음소거·출력 경로를 함께 사용합니다." = "Selected apps share this channel’s volume, EQ, mute, and output route.";
+"앱 1–32개를 선택하세요. 다른 채널의 앱은 함께 지정할 수 없습니다." = "Select 1–32 apps. Apps assigned to other channels cannot be included.";
+"앱 그룹" = "App group";
+"앱 그룹 만들기…" = "Create App Group…";
+"앱 그룹 편집…" = "Edit App Group…";
+"이미 사용 중인 그룹 이름입니다." = "A group already has this name.";
+"재생 %@/%@" = "Playing %@/%@";
+"적용" = "Apply";
+"전환이 끝난 뒤 다시 시도하세요." = "Try again after the transition finishes.";
+"채널 %@에서 사용 중" = "Used by channel %@";
+"채널 %ld · 앱 그룹" = "Channel %ld · App Group";
+"채널 배정이 변경되었습니다. 편집을 닫고 다시 여세요." = "The channel assignment changed. Close and reopen the editor.";
