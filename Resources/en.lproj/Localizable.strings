@@ -245,3 +245,4 @@
 "채널 %@에서 사용 중" = "Used by channel %@";
 "채널 %ld · 앱 그룹" = "Channel %ld · App Group";
 "채널 배정이 변경되었습니다. 편집을 닫고 다시 여세요." = "The channel assignment changed. Close and reopen the editor.";
+"실행 안 됨" = "Not running";
