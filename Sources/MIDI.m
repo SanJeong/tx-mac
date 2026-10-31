@@ -356,7 +356,26 @@ static void TXDecodeBLECC(NSData *packet,BOOL *inSysEx,void (^receive)(UInt8,UIn
 
 @interface TXMIDI ()
 - (void)receivePackets:(const MIDIPacketList*)list source:(MIDIEndpointRef)source;
+- (OSStatus)createMIDIClient:(MIDIClientRef*)client notify:(MIDINotifyBlock)notify;
+- (OSStatus)createMIDIInput:(MIDIClientRef)client port:(MIDIPortRef*)port read:(MIDIReadBlock)read;
+- (void)disposeMIDIInput:(MIDIPortRef)port;
+- (void)disposeMIDIClient:(MIDIClientRef)client;
+- (void)midiSessionReady;
+- (void)attemptStartup;
+- (void)cancelStartupRetry;
+- (void)retryStartupForGeneration:(NSUInteger)generation;
 + (BOOL)selfCheck;
+@end
+
+static NSTimeInterval TXMIDIRetryDelay(NSUInteger attempt) {
+    return MIN(30.0,(double)(1u<<MIN(attempt?attempt-1:0,(NSUInteger)5)));
+}
+
+// Exercise startup failures without contacting CoreMIDI or Bluetooth.
+@interface TXMIDIStartupFixture : TXMIDI
+@property(nonatomic) NSUInteger clientCalls,portCalls,readyCalls,refreshCalls,portDisposals,clientDisposals,badDisposals;
+@property(nonatomic,copy) MIDINotifyBlock notify;
+@property(nonatomic,copy) MIDIReadBlock read;
 @end
 
 @implementation TXMIDI {
@@ -367,35 +386,85 @@ static void TXDecodeBLECC(NSData *packet,BOOL *inSysEx,void (^receive)(UInt8,UIn
     NSMutableDictionary<NSNumber*,NSNumber*> *_runningStatus;
     NSArray<NSString*> *_sources;
     TXBLEReconnect *_ble;
+    BOOL _running;
+    NSUInteger _generation,_startupAttempts,_clientAttempts;
+    OSStatus _lastStartupStatus;
+    NSTimeInterval _nextStartupRetry;
+    dispatch_source_t _startupRetry;
 }
 - (instancetype)init {
     if((self=[super init])){_connected=[NSMutableDictionary dictionary];_pending=[NSMutableDictionary dictionary];_runningStatus=[NSMutableDictionary dictionary];_sources=@[];_transport=@"auto";}return self;
 }
 - (NSArray<NSString*>*)sources{return _sources;}
-- (NSDictionary*)diagnostics{return @{@"direct":@(_ble.direct),@"packets":@(_ble.packets),@"controlMessages":@(_ble.controlMessages),@"activating":@(_ble.activating),@"lastActivateStatus":@(_ble.lastActivateStatus),@"authorization":@(_ble.authorization),@"centralState":@(_ble.central?_ble.central.state:-1),@"enabled":@(_ble.enabled),@"available":@(_ble.available),@"scanning":@(_ble.central.isScanning),@"peripheralState":@(_ble.peripheral?_ble.peripheral.state:-1),@"stage":_ble.stage?:@"idle",@"failure":_ble.lastFailure?:@"",@"knownPeripheral":@([[NSUserDefaults standardUserDefaults] stringForKey:@"TX6Mac.BLEPeripheral"].length>0),@"scanStarts":@(_ble.scanStarts),@"discoveries":@(_ble.discoveries),@"matchingDiscoveries":@(_ble.matchingDiscoveries),@"connectionAttempts":@(_ble.connectionAttempts),@"connectionTimeouts":@(_ble.connectionTimeouts),@"freshReplacements":@(_ble.freshReplacements),@"lastDiscovery":_ble.lastDiscovery?:@{},@"pendingUUID":_ble.peripheral.identifier.UUIDString?:@"",@"scanFilter":@"midi-service"};}
+- (OSStatus)createMIDIClient:(MIDIClientRef*)client notify:(MIDINotifyBlock)notify {return MIDIClientCreateWithBlock(CFSTR("TX6Mac"),client,notify);}
+- (OSStatus)createMIDIInput:(MIDIClientRef)client port:(MIDIPortRef*)port read:(MIDIReadBlock)read {return MIDIInputPortCreateWithBlock(client,CFSTR("TX6Mac Controls"),port,read);}
+- (void)disposeMIDIInput:(MIDIPortRef)port {MIDIPortDispose(port);}
+- (void)disposeMIDIClient:(MIDIClientRef)client {MIDIClientDispose(client);}
+- (NSDictionary*)diagnostics{return @{@"running":@(_running),@"clientReady":@(_client!=0),@"portReady":@(_port!=0),@"startupAttempts":@(_startupAttempts),@"clientAttempts":@(_clientAttempts),@"lastStartupStatus":@(_lastStartupStatus),@"nextStartupRetryUptime":@(_nextStartupRetry),@"direct":@(_ble.direct),@"packets":@(_ble.packets),@"controlMessages":@(_ble.controlMessages),@"activating":@(_ble.activating),@"lastActivateStatus":@(_ble.lastActivateStatus),@"authorization":@(_ble.authorization),@"centralState":@(_ble.central?_ble.central.state:-1),@"enabled":@(_ble.enabled),@"available":@(_ble.available),@"scanning":@(_ble.central.isScanning),@"peripheralState":@(_ble.peripheral?_ble.peripheral.state:-1),@"stage":_ble.stage?:@"idle",@"failure":_ble.lastFailure?:@"",@"knownPeripheral":@([[NSUserDefaults standardUserDefaults] stringForKey:@"TX6Mac.BLEPeripheral"].length>0),@"scanStarts":@(_ble.scanStarts),@"discoveries":@(_ble.discoveries),@"matchingDiscoveries":@(_ble.matchingDiscoveries),@"connectionAttempts":@(_ble.connectionAttempts),@"connectionTimeouts":@(_ble.connectionTimeouts),@"freshReplacements":@(_ble.freshReplacements),@"lastDiscovery":_ble.lastDiscovery?:@{},@"pendingUUID":_ble.peripheral.identifier.UUIDString?:@"",@"scanFilter":@"midi-service"};}
 - (void)start {
-    if(_client)return;
+    if(_running)return;
+    _running=YES;_generation++;_startupAttempts=0;_clientAttempts=0;
+    [self attemptStartup];
+}
+- (void)cancelStartupRetry {
+    if(_startupRetry)dispatch_source_cancel(_startupRetry);
+    _startupRetry=nil;_nextStartupRetry=0;
+}
+- (void)scheduleStartupRetry:(OSStatus)status {
+    _lastStartupStatus=status;
+    [self cancelStartupRetry];
+    if(!_running)return;
+    NSTimeInterval delay=TXMIDIRetryDelay(_startupAttempts);
+    _nextStartupRetry=NSProcessInfo.processInfo.systemUptime+delay;
+    NSUInteger generation=_generation;__weak TXMIDI *weakSelf=self;
+    _startupRetry=dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,0,0,dispatch_get_main_queue());
+    dispatch_source_set_timer(_startupRetry,dispatch_time(DISPATCH_TIME_NOW,(int64_t)(delay*NSEC_PER_SEC)),DISPATCH_TIME_FOREVER,NSEC_PER_MSEC*100);
+    dispatch_source_set_event_handler(_startupRetry,^{[weakSelf retryStartupForGeneration:generation];});
+    dispatch_resume(_startupRetry);
+    NSLog(@"MIDI startup error %d; retry in %.0fs",(int)status,delay);
+}
+- (void)retryStartupForGeneration:(NSUInteger)generation {
+    if(!_running||generation!=_generation)return;
+    [self cancelStartupRetry];[self attemptStartup];
+}
+- (void)attemptStartup {
+    if(!_running||_port)return;
+    _startupAttempts++;NSUInteger generation=++_generation;
     __weak TXMIDI *weakSelf=self;
-    OSStatus status=MIDIClientCreateWithBlock(CFSTR("TX6Mac"),&_client,^(const MIDINotification *message){dispatch_async(dispatch_get_main_queue(),^{[weakSelf refresh];});});
-    if(status!=noErr){NSLog(@"MIDI client error %d",(int)status);return;}
-    status=MIDIInputPortCreateWithBlock(_client,CFSTR("TX6Mac Controls"),&_port,^(const MIDIPacketList *list,void *context){
+    if(!_client){
+        MIDIClientRef client=0;_clientAttempts++;
+        OSStatus status=[self createMIDIClient:&client notify:^(const MIDINotification *message){
+            // The client survives stop/start; deliver topology notices only to a live session.
+            dispatch_async(dispatch_get_main_queue(),^{TXMIDI *m=weakSelf;if(m&&m->_running&&m->_port)[m refresh];});
+        }];
+        if(status!=noErr){[self scheduleStartupRetry:status];return;}
+        _client=client;
+    }
+    MIDIPortRef port=0;
+    OSStatus status=[self createMIDIInput:_client port:&port read:^(const MIDIPacketList *list,void *context){
         MIDIEndpointRef source=(MIDIEndpointRef)(uintptr_t)context;
         size_t size=offsetof(MIDIPacketList,packet);const MIDIPacket *p=list->packet;
         for(UInt32 i=0;i<list->numPackets;i++){size=(const char*)MIDIPacketNext(p)-(const char*)list;p=MIDIPacketNext(p);}
         if(size>1024*1024)return;
         NSData *copy=[NSData dataWithBytes:list length:size];
-        dispatch_async(dispatch_get_main_queue(),^{[weakSelf receivePackets:copy.bytes source:source];});
-    });
-    if(status!=noErr){NSLog(@"MIDI input error %d",(int)status);[self stop];return;}
-    _ble=[TXBLEReconnect new];_ble.changed=^{dispatch_async(dispatch_get_main_queue(),^{[weakSelf refresh];});};
-    _ble.received=^(UInt8 channel,UInt8 cc,UInt8 value){TXMIDI *m=weakSelf;if(m&&m->_connected.count==0&&![m.transport isEqual:@"usb"]&&m.received)m.received(@"TX-6 Bluetooth",channel,cc,value);};[self refresh];
+        dispatch_async(dispatch_get_main_queue(),^{TXMIDI *m=weakSelf;if(m&&m->_running&&m->_generation==generation&&m->_port)[m receivePackets:copy.bytes source:source];});
+    }];
+    // Failed output parameters are undefined; adopt handles only after success.
+    if(status!=noErr){[self scheduleStartupRetry:status];return;}
+    _port=port;_lastStartupStatus=noErr;[self cancelStartupRetry];
+    [self midiSessionReady];
+}
+- (void)midiSessionReady {
+    __weak TXMIDI *weakSelf=self;NSUInteger generation=_generation;
+    _ble=[TXBLEReconnect new];_ble.changed=^{dispatch_async(dispatch_get_main_queue(),^{TXMIDI *m=weakSelf;if(m&&m->_running&&m->_generation==generation&&m->_port)[m refresh];});};
+    _ble.received=^(UInt8 channel,UInt8 cc,UInt8 value){TXMIDI *m=weakSelf;if(m&&m->_running&&m->_generation==generation&&m->_port&&m->_connected.count==0&&![m.transport isEqual:@"usb"]&&m.received)m.received(@"TX-6 Bluetooth",channel,cc,value);};[self refresh];
 }
 - (void)setTransport:(NSString*)transport {
     if(![@[@"auto",@"usb",@"ble"] containsObject:transport])transport=@"auto";
     if([_transport isEqualToString:transport])return;_transport=[transport copy];[self refresh];
 }
 - (void)refresh {
-    if(!_port)return;
+    if(!_running||!_port)return;
     NSSet *previousEndpoints=[NSSet setWithArray:_connected.allKeys];
     NSMutableArray<NSDictionary*> *candidates=[NSMutableArray array];
     for(ItemCount i=0;i<MIDIGetNumberOfSources();i++){
@@ -443,10 +512,45 @@ static void TXDecodeBLECC(NSData *packet,BOOL *inSysEx,void (^receive)(UInt8,UIn
     }_runningStatus[key]=@(running);
 }
 - (void)stop {
-    [_ble stop];_ble=nil;if(_port)MIDIPortDispose(_port);_port=0;if(_client)MIDIClientDispose(_client);_client=0;
+    _running=NO;_generation++;[self cancelStartupRetry];
+    _ble.changed=nil;_ble.received=nil;[_ble stop];_ble=nil;
+    MIDIPortRef port=_port;_port=0;if(port)[self disposeMIDIInput:port];
+    // Apple discourages disposing the last client before another start in this process.
     [_connected removeAllObjects];[_pending removeAllObjects];[_runningStatus removeAllObjects];_sources=@[];
 }
 + (BOOL)selfCheck {
+    TXMIDIStartupFixture *cancelled=[TXMIDIStartupFixture new];TXMIDI *cancelledState=cancelled;
+    [cancelled start];NSUInteger cancelledGeneration=cancelledState->_generation;
+    [cancelled stop];[cancelled stop];[cancelled retryStartupForGeneration:cancelledGeneration];
+    if(cancelled.clientCalls!=1||cancelled.portCalls||cancelled.badDisposals||cancelledState->_startupRetry||cancelledState->_client)return NO;
+    TXMIDIStartupFixture *startup=[TXMIDIStartupFixture new];TXMIDI *state=startup;
+    [startup start];[startup start];
+    if(startup.clientCalls!=1||state->_client||!state->_startupRetry||startup.badDisposals)return NO;
+    NSTimeInterval recoveryDeadline=NSProcessInfo.processInfo.systemUptime+5;
+    while(!startup.readyCalls&&NSProcessInfo.processInfo.systemUptime<recoveryDeadline)CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.005,true);
+    if(startup.clientCalls!=2||startup.portCalls!=2||startup.readyCalls!=1||state->_client!=100||state->_port!=200||state->_startupRetry||startup.clientDisposals||startup.badDisposals)return NO;
+    MIDIReadBlock oldRead=startup.read;dispatch_block_t oldBLE=state->_ble.changed;NSUInteger oldGeneration=state->_generation;
+    [startup stop];
+    [startup retryStartupForGeneration:oldGeneration];
+    if(startup.clientCalls!=2||startup.portCalls!=2||startup.portDisposals!=1||startup.clientDisposals||state->_client!=100||state->_port||state->_startupRetry)return NO;
+    [startup start];
+    if(startup.clientCalls!=2||startup.portCalls!=3||startup.readyCalls!=2)return NO;
+    state->_connected[@123]=@{@"name":@"fixture"};
+    __block NSUInteger stalePackets=0;startup.received=^(NSString *name,UInt8 channel,UInt8 cc,UInt8 value){stalePackets++;};
+    Byte staleStorage[128];MIDIPacketList *staleList=(MIDIPacketList*)staleStorage;Byte staleBytes[]={0xB0,1,127};
+    MIDIPacketListAdd(staleList,sizeof(staleStorage),MIDIPacketListInit(staleList),0,sizeof(staleBytes),staleBytes);
+    MIDINotification notification={.messageID=kMIDIMsgSetupChanged,.messageSize=sizeof(MIDINotification)};
+    BOOL (^drain)(void)=^BOOL{
+        __block BOOL drained=NO;dispatch_async(dispatch_get_main_queue(),^{drained=YES;});
+        NSTimeInterval deadline=NSProcessInfo.processInfo.systemUptime+1;
+        while(!drained&&NSProcessInfo.processInfo.systemUptime<deadline)CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.005,true);
+        return drained;
+    };
+    oldRead(staleList,(void*)(uintptr_t)123);oldBLE();startup.notify(&notification);
+    if(!drain()||stalePackets||startup.refreshCalls!=3||startup.badDisposals)return NO;
+    [startup stop];startup.notify(&notification);oldBLE();
+    if(!drain()||startup.refreshCalls!=3||state->_startupRetry||startup.badDisposals)return NO;
+    if(TXMIDIRetryDelay(1)!=1||TXMIDIRetryDelay(2)!=2||TXMIDIRetryDelay(5)!=16||TXMIDIRetryDelay(6)!=30||TXMIDIRetryDelay(NSUIntegerMax)!=30)return NO;
     if(!TXIsMixerName(@"TX-6 Bluetooth")||!TXIsMixerName(@"TX–6")||TXIsMixerName(@"OB-4red")||TXIsMixerName(@"EP-133"))return NO;
     if(!TXBLEMatchesDiscovery(@"Cached name",@"TX-6")||!TXBLEMatchesDiscovery(@"TX-6",@"")||TXBLEMatchesDiscovery(@"OB-4red",@"EP-133"))return NO;
     NSUUID *current=NSUUID.UUID,*fresh=NSUUID.UUID;
@@ -475,7 +579,20 @@ static void TXDecodeBLECC(NSData *packet,BOOL *inSysEx,void (^receive)(UInt8,UIn
     if(received.count!=6||![received.lastObject isEqual:@[@0,@31,@127]])return NO;
     [m receivePackets:list source:456];return received.count==6;
 }
-- (void)dealloc{[self stop];}
+- (void)dealloc{[self stop];if(_client)[self disposeMIDIClient:_client];}
+@end
+
+@implementation TXMIDIStartupFixture
+- (OSStatus)createMIDIClient:(MIDIClientRef*)client notify:(MIDINotifyBlock)notify {
+    self.clientCalls++;self.notify=notify;*client=self.clientCalls==1?999:100;return self.clientCalls==1?-304:noErr;
+}
+- (OSStatus)createMIDIInput:(MIDIClientRef)client port:(MIDIPortRef*)port read:(MIDIReadBlock)read {
+    self.portCalls++;self.read=read;*port=self.portCalls==1?999:200;return self.portCalls==1?-304:noErr;
+}
+- (void)disposeMIDIInput:(MIDIPortRef)port {self.portDisposals++;if(port!=200)self.badDisposals++;}
+- (void)disposeMIDIClient:(MIDIClientRef)client {self.clientDisposals++;if(client!=100)self.badDisposals++;}
+- (void)midiSessionReady {self.readyCalls++;[super midiSessionReady];}
+- (void)refresh {self.refreshCalls++;}
 @end
 
 BOOL TXRunMIDISelfCheck(void) { return [TXMIDI selfCheck]; }
