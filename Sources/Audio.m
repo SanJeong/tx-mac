@@ -1,6 +1,7 @@
 #import "TX6.h"
 #import "Localization.h"
 #import <math.h>
+#import <float.h>
 #import <libproc.h>
 #import <stdarg.h>
 #import <time.h>
@@ -207,35 +208,66 @@ static float MeterReference(uint64_t frame,double rate) {
     double envelope=fmax(0,fmin(1,fmin(position/fade,(length-1-position)/fade)));
     return pow(10,db[step]/20)*envelope*sin(2*M_PI*440*frame/rate);
 }
+uint64_t TXRequestLevelPeakReset(TXRenderState *state) {
+    return state?atomic_fetch_add_explicit(&state->levelResetRequested,1,memory_order_acq_rel)+1:0;
+}
+static void ClearLevelHolds(TXRenderState *s) {
+    for(int slot=0;slot<TX_SLOTS;slot++){
+        atomic_store_explicit(&s->channelPeakHold[slot],0,memory_order_relaxed);
+        atomic_store_explicit(&s->channelOver[slot],false,memory_order_relaxed);
+    }
+    atomic_store_explicit(&s->mainPreLimiterHold,0,memory_order_relaxed);
+    atomic_store_explicit(&s->monitorPreLimiterHold,0,memory_order_relaxed);
+}
+static void ApplyLevelPeakReset(TXRenderState *s) {
+    uint64_t requested=atomic_load_explicit(&s->levelResetRequested,memory_order_acquire);
+    if(requested==atomic_load_explicit(&s->levelResetApplied,memory_order_relaxed))return;
+    ClearLevelHolds(s);atomic_store_explicit(&s->levelResetApplied,requested,memory_order_release);
+}
+static void ClearLevelCurrent(TXRenderState *s) {
+    for(int slot=0;slot<TX_SLOTS;slot++)atomic_store_explicit(&s->peak[slot],0,memory_order_relaxed);
+    for(int slot=0;slot<6;slot++){atomic_store_explicit(&s->usbPeak[slot],0,memory_order_relaxed);atomic_store_explicit(&s->usbRMS[slot],0,memory_order_relaxed);}
+    atomic_store_explicit(&s->outputPeak,0,memory_order_relaxed);atomic_store_explicit(&s->monitorPeak,0,memory_order_relaxed);
+    atomic_store_explicit(&s->mainPreLimiterPeak,0,memory_order_relaxed);atomic_store_explicit(&s->monitorPreLimiterPeak,0,memory_order_relaxed);
+    atomic_store_explicit(&s->mainGainReductionDB,0,memory_order_relaxed);atomic_store_explicit(&s->monitorGainReductionDB,0,memory_order_relaxed);
+}
+static void ResetLevelRecords(TXRenderState *s) {
+    uint64_t requested=atomic_load_explicit(&s->levelResetRequested,memory_order_acquire);
+    ClearLevelCurrent(s);ClearLevelHolds(s);atomic_store_explicit(&s->levelResetApplied,requested,memory_order_release);
+}
+static OSStatus LevelLayoutFault(TXRenderState *s,int fault) {
+    atomic_store(&s->layoutFault,fault);ClearLevelCurrent(s);return noErr;
+}
+static float LevelReductionDB(float gain) {
+    return -20*log10f(fminf(1,fmaxf(1e-9f,gain)));
+}
 static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const AudioBufferList *input,const AudioTimeStamp *it,AudioBufferList *output,const AudioTimeStamp *ot,void *context) {
-    TXRenderState *s=context;
-    if(!input||!output){atomic_store(&s->layoutFault,4);return noErr;}
+    TXRenderState *s=context;ApplyLevelPeakReset(s);
+    if(!input||!output){return LevelLayoutFault(s,4);}
     for(UInt32 b=0;b<output->mNumberBuffers;b++)if(output->mBuffers[b].mData)memset(output->mBuffers[b].mData,0,output->mBuffers[b].mDataByteSize);
     UInt32 channels=0;for(UInt32 b=0;b<input->mNumberBuffers;b++)channels+=input->mBuffers[b].mNumberChannels;
-    if(channels!=s->physicalInputChannels+2*s->tapCount){atomic_store(&s->layoutFault,1);return noErr;}
+    if(channels!=s->physicalInputChannels+2*s->tapCount){return LevelLayoutFault(s,1);}
     float *out[2];UInt32 os[2],of[2];
-    if(!ChannelPointer(output,s->outputLeft,&out[0],&os[0],&of[0])||!ChannelPointer(output,s->outputRight,&out[1],&os[1],&of[1])){atomic_store(&s->layoutFault,2);return noErr;}
+    if(!ChannelPointer(output,s->outputLeft,&out[0],&os[0],&of[0])||!ChannelPointer(output,s->outputRight,&out[1],&os[1],&of[1])){return LevelLayoutFault(s,2);}
     UInt32 frames=MIN(of[0],of[1]);float *monitor[2];UInt32 mos[2];
     if(s->monitorEnabled)for(int c=0;c<2;c++){
-        UInt32 n=0;if(!ChannelPointer(output,c?s->monitorRight:s->monitorLeft,&monitor[c],&mos[c],&n)){atomic_store(&s->layoutFault,6);return noErr;}frames=MIN(frames,n);
+        UInt32 n=0;if(!ChannelPointer(output,c?s->monitorRight:s->monitorLeft,&monitor[c],&mos[c],&n)){return LevelLayoutFault(s,6);}frames=MIN(frames,n);
     }
     float *in[TX_SLOTS][2];UInt32 stride[TX_SLOTS][2];
     float *meter[6][2];UInt32 ms[6][2];
     if(s->meterEnabled)for(int slot=0;slot<6;slot++)for(int c=0;c<2;c++){
-        UInt32 n=0;if(!ChannelPointer(output,s->meterOutputOffset+slot*2+c,&meter[slot][c],&ms[slot][c],&n)){atomic_store(&s->layoutFault,5);return noErr;}frames=MIN(frames,n);
+        UInt32 n=0;if(!ChannelPointer(output,s->meterOutputOffset+slot*2+c,&meter[slot][c],&ms[slot][c],&n)){return LevelLayoutFault(s,5);}frames=MIN(frames,n);
     }
     for(int t=0;t<s->tapCount;t++)for(int c=0;c<2;c++){
-        UInt32 n=0;if(!ChannelPointer(input,s->physicalInputChannels+t*2+c,&in[t][c],&stride[t][c],&n)){atomic_store(&s->layoutFault,3);return noErr;}frames=MIN(frames,n);
+        UInt32 n=0;if(!ChannelPointer(input,s->physicalInputChannels+t*2+c,&in[t][c],&stride[t][c],&n)){return LevelLayoutFault(s,3);}frames=MIN(frames,n);
     }
     // Validate live IO while suppressing every output during a protected transition.
     if(atomic_load(&s->transitionMuted)){
-        for(int slot=0;slot<TX_SLOTS;slot++)atomic_store(&s->peak[slot],0);
-        atomic_store(&s->outputPeak,0);atomic_store(&s->monitorPeak,0);
-        for(int slot=0;slot<6;slot++){atomic_store(&s->usbPeak[slot],0);atomic_store(&s->usbRMS[slot],0);}
+        ClearLevelCurrent(s);
         atomic_fetch_add(&s->callbacks,1);atomic_fetch_add(&s->frames,frames);return noErr;
     }
     float target[TX_SLOTS],peaks[TX_SLOTS]={0},outputPeak=0,monitorPeak=0,usbPeak[6]={0};
-    UInt32 routes[TX_SLOTS];BOOL muted[TX_SLOTS];double usbEnergy[6]={0};
+    UInt32 routes[TX_SLOTS];BOOL muted[TX_SLOTS];double usbEnergy[6]={0};float busPeaks[2]={0};
     BOOL reference=atomic_load(&s->meterReference);
     for(int t=0;t<s->tapCount;t++){
         int slot=s->tapSlots[t];float rawGain=atomic_load(&s->gain[slot]);muted[slot]=atomic_load(&s->muted[slot]);target[t]=muted[slot]||!isfinite(rawGain)?0:fmaxf(0,fminf(1,rawGain));
@@ -288,6 +320,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         for(int bus=0;bus<(s->monitorEnabled?2:1);bus++){
             float *pcm=bus?monitorMix:mix;float gain=masterGain*(bus?monitorGain:1);
             float peak=fmaxf(fabsf(pcm[0]),fabsf(pcm[1]))*gain;
+            busPeaks[bus]=fmaxf(busPeaks[bus],fminf(FLT_MAX,peak));
             float required=peak>0.98f?0.98f/peak:1;
             float *limiter=bus?&s->monitorLimiterGain:&s->limiterGain;
             if(required<*limiter)*limiter=required;
@@ -301,7 +334,18 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         }
         if(limited)atomic_fetch_add_explicit(&s->limitedFrames,1,memory_order_relaxed);
     }
-    for(int slot=0;slot<TX_SLOTS;slot++)atomic_store(&s->peak[slot],peaks[slot]);atomic_store(&s->outputPeak,outputPeak);atomic_store(&s->monitorPeak,monitorPeak);
+    for(int slot=0;slot<TX_SLOTS;slot++){
+        atomic_store(&s->peak[slot],peaks[slot]);
+        atomic_store_explicit(&s->channelPeakHold[slot],fmaxf(atomic_load_explicit(&s->channelPeakHold[slot],memory_order_relaxed),peaks[slot]),memory_order_relaxed);
+        if(peaks[slot]>1)atomic_store_explicit(&s->channelOver[slot],true,memory_order_relaxed);
+    }
+    atomic_store_explicit(&s->mainPreLimiterPeak,busPeaks[0],memory_order_relaxed);
+    atomic_store_explicit(&s->monitorPreLimiterPeak,busPeaks[1],memory_order_relaxed);
+    atomic_store_explicit(&s->mainPreLimiterHold,fmaxf(atomic_load_explicit(&s->mainPreLimiterHold,memory_order_relaxed),busPeaks[0]),memory_order_relaxed);
+    atomic_store_explicit(&s->monitorPreLimiterHold,fmaxf(atomic_load_explicit(&s->monitorPreLimiterHold,memory_order_relaxed),busPeaks[1]),memory_order_relaxed);
+    atomic_store_explicit(&s->mainGainReductionDB,frames?LevelReductionDB(s->limiterGain):0,memory_order_relaxed);
+    atomic_store_explicit(&s->monitorGainReductionDB,s->monitorEnabled&&frames?LevelReductionDB(s->monitorLimiterGain):0,memory_order_relaxed);
+    atomic_store(&s->outputPeak,outputPeak);atomic_store(&s->monitorPeak,monitorPeak);
     for(int slot=0;slot<6;slot++){atomic_store(&s->usbPeak[slot],usbPeak[slot]);atomic_store(&s->usbRMS[slot],frames?sqrt(usbEnergy[slot]/(2*frames)):0);}
     atomic_fetch_add(&s->callbacks,1);atomic_fetch_add(&s->frames,frames);return noErr;
 }
@@ -739,9 +783,8 @@ int TXProbeAudioMuteGuard(void) {
     _state->meterEnabled=NO;_state->meterOutputOffset=0;_state->monitorEnabled=NO;_state->monitorLeft=0;_state->monitorRight=0;
     _state->tapCount=0;_state->physicalInputChannels=0;
     _state->meterReferenceFrame=0;
-    atomic_store(&_state->monitorPeak,0);atomic_store(&_state->callbacks,0);atomic_store(&_state->frames,0);atomic_store(&_state->limitedFrames,0);atomic_store(&_state->layoutFault,0);
-    for(int slot=0;slot<TX_SLOTS;slot++)atomic_store(&_state->peak[slot],0);atomic_store(&_state->outputPeak,0);
-    for(int slot=0;slot<6;slot++){atomic_store(&_state->usbPeak[slot],0);atomic_store(&_state->usbRMS[slot],0);}
+    ResetLevelRecords(_state);
+    atomic_store(&_state->callbacks,0);atomic_store(&_state->frames,0);atomic_store(&_state->limitedFrames,0);atomic_store(&_state->layoutFault,0);
 }
 - (void)dealloc{[self stop];free(_state);}
 @end
@@ -1005,6 +1048,7 @@ BOOL TXRunSelfCheck(void) {
     struct{UInt32 count;AudioBuffer buf[1];} output={1,{{8,sizeof(out),out}}};
     Render(0,NULL,(AudioBufferList*)&input,NULL,(AudioBufferList*)&output,NULL,&s);
     if(atomic_load(&s.frames)!=64||fabs(out[0]-0.3)>0.00001||fabs(atomic_load(&s.outputPeak)-0.3)>0.00001||out[2]!=0)return NO;
+    if(fabsf(atomic_load(&s.channelPeakHold[0])-.1f)>1e-6||fabsf(atomic_load(&s.mainPreLimiterPeak)-.3f)>1e-6||fabsf(atomic_load(&s.mainPreLimiterHold)-.3f)>1e-6){fprintf(stderr,"Level hold/pre-limiter telemetry missed a render callback\n");return NO;}
     atomic_store(&s.route[0],TXOutputMonitor);
     Render(0,NULL,(AudioBufferList*)&input,NULL,(AudioBufferList*)&output,NULL,&s);
     if(fabs(out[0]-.2f)>1e-6){fprintf(stderr,"Missing monitor leaked to main: %f\n",out[0]);return NO;}
@@ -1099,6 +1143,100 @@ BOOL TXRunSelfCheck(void) {
     for(int f=0;f<64;f++){source[2*f]=.1f;source[2*f+1]=-.05f;remainder[2*f]=.2f;remainder[2*f+1]=-.1f;}
     struct{UInt32 count;AudioBuffer buf[2];} ri={2,{{2,sizeof(source),source},{2,sizeof(remainder),remainder}}};
     struct{UInt32 count;AudioBuffer buf[3];} ro={3,{{2,64*2*sizeof(float),buses},{2,64*2*sizeof(float),buses+128},{12,64*12*sizeof(float),buses+256}}};
+#define LEVEL_EXPECT(condition) do{if(!(condition)){fprintf(stderr,"Level telemetry self-check failed at line %d\n",__LINE__);return NO;}}while(0)
+    TXRenderState levels;memcpy(&levels,&routed,sizeof(levels));atomic_store(&levels.route[0],TXOutputBoth);
+    float levelSource[2]={1.25f,-.625f},levelRemainder[2]={0,0};
+    struct{UInt32 count;AudioBuffer buf[2];} levelInput={2,{{2,sizeof(levelSource),levelSource},{2,sizeof(levelRemainder),levelRemainder}}};
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(atomic_load(&levels.frames)==1&&atomic_load(&levels.channelOver[0])&&atomic_load(&levels.channelPeakHold[0])==1.25f);
+    LEVEL_EXPECT(atomic_load(&levels.mainPreLimiterPeak)==1.25f&&atomic_load(&levels.monitorPreLimiterPeak)==1.25f);
+    levelSource[0]=.05f;levelSource[1]=-.025f;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(atomic_load(&levels.peak[0])==.05f&&atomic_load(&levels.channelPeakHold[0])==1.25f&&atomic_load(&levels.channelOver[0]));
+    LEVEL_EXPECT(atomic_load(&levels.mainPreLimiterPeak)==.05f&&atomic_load(&levels.mainPreLimiterHold)==1.25f&&atomic_load(&levels.monitorPreLimiterHold)==1.25f);
+    atomic_store(&levels.masterMuted,true);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(atomic_load(&levels.peak[0])==.05f&&atomic_load(&levels.mainPreLimiterPeak)==0&&atomic_load(&levels.monitorPreLimiterPeak)==0&&atomic_load(&levels.channelPeakHold[0])==1.25f);
+    LEVEL_EXPECT(fabsf(atomic_load(&levels.mainGainReductionDB)+20*log10f(levels.limiterGain))<1e-5&&fabsf(atomic_load(&levels.monitorGainReductionDB)+20*log10f(levels.monitorLimiterGain))<1e-5);
+    float requestGR=atomic_load(&levels.mainGainReductionDB);uint64_t request1=TXRequestLevelPeakReset(&levels),request2=TXRequestLevelPeakReset(&levels);
+    LEVEL_EXPECT(request1==1&&request2==2&&atomic_load(&levels.levelResetApplied)==0&&atomic_load(&levels.channelPeakHold[0])==1.25f&&atomic_load(&levels.mainGainReductionDB)==requestGR);
+    levelSource[0]=levelSource[1]=0;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(atomic_load(&levels.levelResetApplied)==request2&&fabsf(atomic_load(&levels.channelPeakHold[0]))<1e-7&&!atomic_load(&levels.channelOver[0])&&atomic_load(&levels.mainPreLimiterHold)==0&&atomic_load(&levels.monitorPreLimiterHold)==0);
+    LEVEL_EXPECT(fabsf(atomic_load(&levels.mainGainReductionDB)+20*log10f(levels.limiterGain))<1e-5);
+    atomic_store(&levels.masterMuted,false);levels.smoothMaster=1;levelSource[0]=.2f;levelSource[1]=-.1f;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    uint64_t request3=TXRequestLevelPeakReset(&levels);
+    LEVEL_EXPECT(request3==3&&atomic_load(&levels.levelResetApplied)==request2&&atomic_load(&levels.channelPeakHold[0])==.2f);
+    levelSource[0]=levelSource[1]=0;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(atomic_load(&levels.levelResetApplied)==request3&&fabsf(atomic_load(&levels.channelPeakHold[0]))<1e-7);
+    atomic_store(&levels.route[0],TXOutputOff);levelSource[0]=1;levelSource[1]=-.5f;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(atomic_load(&levels.peak[0])==1&&!atomic_load(&levels.channelOver[0])&&atomic_load(&levels.mainPreLimiterPeak)==0&&atomic_load(&levels.monitorPreLimiterPeak)==0&&buses[0]==0&&buses[128]==0&&buses[256]==0);
+    levelSource[0]=1.0001f;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(atomic_load(&levels.channelOver[0])&&atomic_load(&levels.channelPeakHold[0])==1.0001f);
+    levelSource[0]=3.2f;levelSource[1]=-1.6f;atomic_store(&levels.gain[0],.25f);levels.smoothGain[0]=.25f;TXRequestLevelPeakReset(&levels);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(fabsf(atomic_load(&levels.channelPeakHold[0])-.8f)<1e-6&&!atomic_load(&levels.channelOver[0])&&atomic_load(&levels.mainPreLimiterPeak)==0);
+    atomic_store(&levels.gain[0],1);levels.smoothGain[0]=1;atomic_store(&levels.route[0],TXOutputBoth);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(atomic_load(&levels.channelOver[0])&&fabsf(atomic_load(&levels.mainPreLimiterPeak)-3.2f)<1e-6&&fabsf(atomic_load(&levels.mainGainReductionDB)-20*log10f(3.2f/.98f))<1e-5);
+    levelSource[0]=.9f;levelSource[1]=-.45f;atomic_store(&levels.eq[0][1],18);levels.currentEQ[0][1]=18;
+    memset(&levels.filters[0][1],0,sizeof(TXFilter));SetFilter(&levels.filters[0][1],1,18,48000);TXRequestLevelPeakReset(&levels);
+    float eqPeak=.9f*levels.filters[0][1].b0;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(eqPeak>1&&fabsf(atomic_load(&levels.channelPeakHold[0])-eqPeak)<1e-6&&atomic_load(&levels.channelOver[0]));
+    atomic_store(&levels.gain[0],.25f);levels.smoothGain[0]=.25f;
+    memset(&levels.filters[0][1],0,sizeof(TXFilter));SetFilter(&levels.filters[0][1],1,18,48000);TXRequestLevelPeakReset(&levels);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(fabsf(atomic_load(&levels.channelPeakHold[0])-eqPeak*.25f)<1e-6&&!atomic_load(&levels.channelOver[0]));
+    float holdBeforeMute=atomic_load(&levels.channelPeakHold[0]);atomic_store(&levels.muted[0],true);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(atomic_load(&levels.peak[0])==0&&atomic_load(&levels.channelPeakHold[0])==holdBeforeMute);
+    TXRequestLevelPeakReset(&levels);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&levels);
+    LEVEL_EXPECT(atomic_load(&levels.peak[0])==0&&atomic_load(&levels.channelPeakHold[0])==0&&!atomic_load(&levels.channelOver[0]));
+    TXRenderState busLevels;memcpy(&busLevels,&routed,sizeof(busLevels));atomic_store(&busLevels.route[0],TXOutputMonitor);
+    levelSource[0]=.2f;levelSource[1]=-.1f;levelRemainder[0]=2;levelRemainder[1]=-1;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.mainPreLimiterPeak)==2&&atomic_load(&busLevels.monitorPreLimiterPeak)==.2f&&fabsf(atomic_load(&busLevels.mainGainReductionDB)-20*log10f(2/.98f))<1e-5&&atomic_load(&busLevels.monitorGainReductionDB)==0);
+    memcpy(&busLevels,&routed,sizeof(busLevels));atomic_store(&busLevels.route[0],TXOutputMonitor);
+    levelSource[0]=.75f;levelSource[1]=-.375f;levelRemainder[0]=.2f;levelRemainder[1]=-.1f;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.mainPreLimiterPeak)==.2f&&atomic_load(&busLevels.monitorPreLimiterPeak)==.75f&&atomic_load(&busLevels.mainGainReductionDB)==0&&atomic_load(&busLevels.monitorGainReductionDB)==0&&!atomic_load(&busLevels.channelOver[0])&&fabsf(buses[256]-.98f)<1e-6);
+    memcpy(&busLevels,&routed,sizeof(busLevels));atomic_store(&busLevels.route[0],TXOutputMonitor);levelSource[0]=2;levelSource[1]=-1;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.mainPreLimiterPeak)==.2f&&atomic_load(&busLevels.monitorPreLimiterPeak)==2&&atomic_load(&busLevels.mainGainReductionDB)==0&&fabsf(atomic_load(&busLevels.monitorGainReductionDB)-20*log10f(2/.98f))<1e-5);
+    atomic_store(&busLevels.masterMuted,true);levelRemainder[0]=2;levelRemainder[1]=-1;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.peak[0])==2&&atomic_load(&busLevels.mainPreLimiterPeak)==0&&atomic_load(&busLevels.monitorPreLimiterPeak)==0&&atomic_load(&busLevels.monitorPreLimiterHold)==2);
+    atomic_store(&busLevels.muted[0],true);TXRequestLevelPeakReset(&busLevels);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.channelPeakHold[0])==0&&!atomic_load(&busLevels.channelOver[0])&&atomic_load(&busLevels.channelPeakHold[6])==2&&atomic_load(&busLevels.channelOver[6])&&atomic_load(&busLevels.mainPreLimiterHold)==0&&atomic_load(&busLevels.monitorPreLimiterHold)==0);
+    atomic_store(&busLevels.masterMuted,false);atomic_store(&busLevels.muted[0],false);busLevels.smoothGain[0]=1;busLevels.smoothMaster=1;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    float gatedMainGain=busLevels.limiterGain,gatedMonitorGain=busLevels.monitorLimiterGain;
+    atomic_store(&busLevels.transitionMuted,true);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.peak[0])==0&&atomic_load(&busLevels.mainPreLimiterPeak)==0&&atomic_load(&busLevels.monitorPreLimiterPeak)==0&&atomic_load(&busLevels.mainGainReductionDB)==0&&atomic_load(&busLevels.monitorGainReductionDB)==0&&atomic_load(&busLevels.channelOver[0])&&atomic_load(&busLevels.monitorPreLimiterHold)==2&&busLevels.limiterGain==gatedMainGain&&busLevels.monitorLimiterGain==gatedMonitorGain);
+    uint64_t gatedReset=TXRequestLevelPeakReset(&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.channelPeakHold[0])==2);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.levelResetApplied)==gatedReset&&atomic_load(&busLevels.channelPeakHold[0])==0&&!atomic_load(&busLevels.channelOver[0])&&atomic_load(&busLevels.mainPreLimiterHold)==0&&atomic_load(&busLevels.monitorPreLimiterHold)==0&&busLevels.limiterGain==gatedMainGain);
+    atomic_store(&busLevels.transitionMuted,false);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    levelInput.count=1;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.layoutFault)==1&&atomic_load(&busLevels.peak[0])==0&&atomic_load(&busLevels.mainPreLimiterPeak)==0&&atomic_load(&busLevels.monitorPreLimiterPeak)==0&&atomic_load(&busLevels.mainGainReductionDB)==0&&atomic_load(&busLevels.monitorGainReductionDB)==0&&atomic_load(&busLevels.channelPeakHold[0])==2&&atomic_load(&busLevels.channelOver[0]));
+    uint64_t faultReset=TXRequestLevelPeakReset(&busLevels);
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.levelResetApplied)==faultReset&&atomic_load(&busLevels.channelPeakHold[0])==0&&!atomic_load(&busLevels.channelOver[0]));
+    levelInput.count=2;atomic_store(&busLevels.layoutFault,0);busLevels.monitorEnabled=NO;levelRemainder[0]=.2f;levelRemainder[1]=-.1f;
+    Render(0,NULL,(AudioBufferList*)&levelInput,NULL,(AudioBufferList*)&ro,NULL,&busLevels);
+    LEVEL_EXPECT(atomic_load(&busLevels.monitorPreLimiterPeak)==0&&atomic_load(&busLevels.monitorGainReductionDB)==0&&atomic_load(&busLevels.monitorPeak)==0&&atomic_load(&busLevels.usbPeak[0])==0);
+#undef LEVEL_EXPECT
     atomic_store(&routed.route[0],TXOutputBoth);
     Render(0,NULL,(AudioBufferList*)&ri,NULL,(AudioBufferList*)&ro,NULL,&routed);
     uint64_t guardCallbacks=atomic_load(&routed.callbacks),guardFrames=atomic_load(&routed.frames);
@@ -1207,8 +1345,19 @@ BOOL TXRunSelfCheck(void) {
     for(int i=0;i<16*64;i++)if(buses[i]!=0)return NO;
     TXAudio *controls=[TXAudio new];if(atomic_load(&controls.state->monitorGain)!=1||controls.monitoring)return NO;
     atomic_store(&controls.state->route[0],TXOutputBoth);atomic_store(&controls.state->monitorGain,.4f);atomic_store(&controls.state->master,.7f);atomic_store(&controls.state->gain[0],.6f);
+    for(int slot=0;slot<TX_SLOTS;slot++){atomic_store(&controls.state->channelPeakHold[slot],2);atomic_store(&controls.state->channelOver[slot],true);}
+    atomic_store(&controls.state->mainPreLimiterPeak,2);atomic_store(&controls.state->mainPreLimiterHold,3);atomic_store(&controls.state->mainGainReductionDB,6);
+    atomic_store(&controls.state->monitorPreLimiterPeak,2);atomic_store(&controls.state->monitorPreLimiterHold,3);atomic_store(&controls.state->monitorGainReductionDB,6);
+    uint64_t stoppedReset=TXRequestLevelPeakReset(controls.state);
     atomic_store(&controls.state->monitorPeak,.9f);atomic_store(&controls.state->usbPeak[0],.8f);[controls stop];
     if(controls.monitoring||controls.state->monitorEnabled||controls.state->meterEnabled||atomic_load(&controls.state->monitorPeak)!=0||atomic_load(&controls.state->usbPeak[0])!=0||atomic_load(&controls.state->route[0])!=TXOutputBoth||atomic_load(&controls.state->monitorGain)!=.4f||atomic_load(&controls.state->master)!=.7f||atomic_load(&controls.state->gain[0])!=.6f)return NO;
+    if(atomic_load(&controls.state->levelResetApplied)!=stoppedReset||atomic_load(&controls.state->mainPreLimiterPeak)||atomic_load(&controls.state->mainPreLimiterHold)||atomic_load(&controls.state->mainGainReductionDB)||atomic_load(&controls.state->monitorPreLimiterPeak)||atomic_load(&controls.state->monitorPreLimiterHold)||atomic_load(&controls.state->monitorGainReductionDB))return NO;
+    for(int slot=0;slot<TX_SLOTS;slot++)if(atomic_load(&controls.state->channelPeakHold[slot])||atomic_load(&controls.state->channelOver[slot]))return NO;
+    atomic_store(&controls.state->channelPeakHold[0],4);atomic_store(&controls.state->channelOver[0],true);atomic_store(&controls.state->mainPreLimiterHold,4);
+    uint64_t startedReset=TXRequestLevelPeakReset(controls.state);__block BOOL invalidStart=YES;dispatch_semaphore_t startFinished=dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0),^{invalidStart=[controls startOnDevice:0 groups:@[]];dispatch_semaphore_signal(startFinished);});
+    dispatch_semaphore_wait(startFinished,DISPATCH_TIME_FOREVER);
+    if(invalidStart||atomic_load(&controls.state->levelResetApplied)!=startedReset||startedReset<=stoppedReset||atomic_load(&controls.state->channelPeakHold[0])||atomic_load(&controls.state->channelOver[0])||atomic_load(&controls.state->mainPreLimiterHold))return NO;
     TXUSBReferenceState direct={.rate=48000,.frame=1000};DirectReference(0,NULL,NULL,NULL,(AudioBufferList*)&mout,NULL,&direct);
     if(atomic_load(&direct.frames)!=64||atomic_load(&direct.fault))return NO;
     for(int f=0;f<64;f++){float expected=pow(10,-18.0/20)*sin(2*M_PI*440*(1000+f)/48000);if(fabsf(multi[f*14+2]-expected)>1e-6||multi[f*14+2]!=multi[f*14+3])return NO;for(int c=0;c<14;c++)if(c!=2&&c!=3&&multi[f*14+c]!=0)return NO;}

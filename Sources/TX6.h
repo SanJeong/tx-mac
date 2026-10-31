@@ -15,6 +15,13 @@ typedef struct {
     _Atomic(UInt32) route[TX_SLOTS];
     _Atomic(float) monitorGain, monitorPeak;
     _Atomic(float) peak[TX_SLOTS], outputPeak;
+    // Channel DSP/mute sample peaks, before master and routing.
+    _Atomic(float) channelPeakHold[TX_SLOTS];
+    _Atomic(bool) channelOver[TX_SLOTS];
+    // Bus peaks before limiting; GR is positive dB attenuation, independent of USB.
+    _Atomic(float) mainPreLimiterPeak, mainPreLimiterHold, mainGainReductionDB;
+    _Atomic(float) monitorPreLimiterPeak, monitorPreLimiterHold, monitorGainReductionDB;
+    _Atomic(uint64_t) levelResetRequested, levelResetApplied;
     _Atomic(float) usbPeak[6], usbRMS[6];
     _Atomic(bool) meterReference, transitionMuted;
     uint64_t meterReferenceFrame;
@@ -35,6 +42,9 @@ typedef struct {
     int tapSlots[TX_SLOTS];
     _Atomic(int) tapCount;
 } TXRenderState;
+
+// Requests only hold/OVER reset; the render callback owns the recorded values.
+uint64_t TXRequestLevelPeakReset(TXRenderState *state);
 
 // Own this guard independently of TXAudio; begin/end belong on the serial HAL worker.
 @interface TXAudioMuteGuard : NSObject
