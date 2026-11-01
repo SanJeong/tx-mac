@@ -385,9 +385,10 @@ static BOOL TXConsumeDeviceContext(TXDeviceContext *context,UInt8 cc,UInt8 value
         else if(context->shiftDown){BOOL home=context->shiftSoloCandidate&&!context->shiftUsed;context->shiftDown=NO;context->shiftSoloCandidate=NO;context->shiftUsed=NO;if(home){context->suspended=NO;context->reason=0;}}
         return YES;
     }
+    if(cc>=1&&cc<=24){if(context->shiftDown)context->shiftUsed=YES;return NO;}
     if(context->shiftDown){context->shiftUsed=YES;if(pressed&&((cc>=25&&cc<=34)||cc==36||cc==37)){context->suspended=YES;context->reason=cc;}return YES;}
     if(pressed&&(cc==32||cc==36||cc==37)){context->suspended=YES;context->reason=cc;return YES;}
-    return context->suspended&&(context->reason||cc==31);
+    return context->suspended&&cc==31;
 }
 static BOOL TXRunDeviceContextSelfCheck(void) {
     TXDeviceContext context={0};
@@ -397,7 +398,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     TXConsumeDeviceContext(&context,35,127);TXConsumeDeviceContext(&context,35,0);if(context.suspended||TXConsumeDeviceContext(&context,31,1))return NO;
     TXConsumeDeviceContext(&context,32,127);if(!TXConsumeDeviceContext(&context,31,127))return NO;
     TXConsumeDeviceContext(&context,35,127);TXConsumeDeviceContext(&context,35,0);if(context.suspended)return NO;
-    TXConsumeDeviceContext(&context,36,127);if(!context.suspended||!TXConsumeDeviceContext(&context,25,127))return NO;
+    TXConsumeDeviceContext(&context,36,127);if(!context.suspended||TXConsumeDeviceContext(&context,25,127))return NO;
     TXConsumeDeviceContext(&context,35,127);TXConsumeDeviceContext(&context,35,0);
     TXConsumeDeviceContext(&context,35,127);TXConsumeDeviceContext(&context,25,127);TXConsumeDeviceContext(&context,35,0);if(!context.suspended)return NO;
     TXConsumeDeviceContext(&context,35,127);TXConsumeDeviceContext(&context,31,1);TXConsumeDeviceContext(&context,35,0);if(!context.suspended)return NO;
@@ -406,7 +407,35 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     TXConsumeDeviceContext(&context,37,127);if(!context.suspended)return NO;
     context=(TXDeviceContext){.suspended=YES};for(UInt8 cc=1;cc<=30;cc++)if(TXConsumeDeviceContext(&context,cc,127))return NO;
     if(TXConsumeDeviceContext(&context,33,127)||TXConsumeDeviceContext(&context,34,127))return NO;
-    return context.suspended&&!context.reason&&TXConsumeDeviceContext(&context,31,1);
+    if(!context.suspended||context.reason||!TXConsumeDeviceContext(&context,31,1))return NO;
+    const UInt8 menus[]={25,30,32,33,34,36,37};
+    for(NSUInteger m=0;m<sizeof(menus);m++){
+        context=(TXDeviceContext){.suspended=YES,.reason=menus[m]};
+        for(UInt8 cc=1;cc<=30;cc++)if(TXConsumeDeviceContext(&context,cc,127))return NO;
+        if(TXConsumeDeviceContext(&context,33,127)||TXConsumeDeviceContext(&context,34,127)||!TXConsumeDeviceContext(&context,31,1))return NO;
+        TXConsumeDeviceContext(&context,35,127);
+        for(UInt8 cc=1;cc<=24;cc++)if(TXConsumeDeviceContext(&context,cc,64))return NO;
+        if(!context.shiftUsed||!TXConsumeDeviceContext(&context,25,127)||!TXConsumeDeviceContext(&context,33,127))return NO;
+        TXConsumeDeviceContext(&context,35,0);
+        if(!context.suspended||TXConsumeDeviceContext(&context,25,127))return NO;
+        TXConsumeDeviceContext(&context,35,127);TXConsumeDeviceContext(&context,35,0);
+        if(context.suspended||TXConsumeDeviceContext(&context,31,1))return NO;
+    }
+    for(UInt8 cc=1;cc<=24;cc++)for(int value=0;value<=127;value+=127){
+        context=(TXDeviceContext){0};TXConsumeDeviceContext(&context,35,127);
+        if(TXConsumeDeviceContext(&context,cc,(UInt8)value)||!context.shiftUsed)return NO;
+        TXConsumeDeviceContext(&context,35,0);
+        if(context.suspended||context.shiftDown||TXConsumeDeviceContext(&context,31,1))return NO;
+    }
+    const UInt8 buttons[]={25,26,27,28,29,30,31,32,33,34,36,37};
+    for(NSUInteger i=0;i<sizeof(buttons);i++){
+        context=(TXDeviceContext){0};TXConsumeDeviceContext(&context,35,127);
+        if(!TXConsumeDeviceContext(&context,buttons[i],127)||!TXConsumeDeviceContext(&context,buttons[i],0))return NO;
+        TXConsumeDeviceContext(&context,35,0);
+        if(!context.suspended||context.shiftDown)return NO;
+        if(TXConsumeDeviceContext(&context,buttons[i],0)!=(buttons[i]==31))return NO;
+    }
+    return YES;
 }
 
 @interface TXGroupPanel:NSView

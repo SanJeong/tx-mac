@@ -34,7 +34,7 @@ Choose a MONITOR device and set each channel to Main, Monitor, Both or Off. Prev
 
 TX-6 audio output uses one stereo pair. Six-track output and native AUX/CUE routing are not supported.
 
-On the TX-6 home screen, press and release SHIFT to enable the SELECT master knob. Align the device's master number manually in setup.
+On the TX-6 home screen, press and release SHIFT to enable the SELECT master knob. Align the device's master number manually in setup. Menu protection applies only to SELECT; faders, EQ, mute and FX remain available. SHIFT button combinations stay reserved for device menus.
 
 SCENE saves assignments, levels, EQ, mute and routing, keeping master and FX2 unchanged. Saved scenes wait for unavailable outputs. Create app groups from a channel's app menu. Levels shows sample peaks and limiter activity; Reset clears peak history.
 
