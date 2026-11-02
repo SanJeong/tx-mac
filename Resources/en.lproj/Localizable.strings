@@ -246,3 +246,12 @@
 "채널 %ld · 앱 그룹" = "Channel %ld · App Group";
 "채널 배정이 변경되었습니다. 편집을 닫고 다시 여세요." = "The channel assignment changed. Close and reopen the editor.";
 "실행 안 됨" = "Not running";
+
+"영상 싱크 보정" = "Video sync compensation";
+"원래 앱 출력과 믹서 출력의 장치 지연 차이를 추정해 소리가 먼저 나오는 경로를 보정합니다. 출력 장치는 바꾸지 않습니다." = "Estimates the latency difference between the app’s original output and mixer outputs to compensate routes where audio plays early. Output devices stay unchanged.";
+"보정 꺼짐 · 원래 믹서 지연으로 재생" = "Compensation off · original mixer timing";
+"믹서가 시작되면 출력 지연을 확인합니다." = "Output latency is checked when the mixer starts.";
+"출력 지연 확인 중" = "Checking output latency";
+"A/V SYNC · 최대 MAIN +%.0f ms · MON +%.0f ms\n장치 지연 기준 추정값 · 일부 경로는 보정되지 않을 수 있습니다." = "A/V SYNC · MAX MAIN +%.0f ms · MON +%.0f ms\nDevice latency estimate · some routes may be uncompensated.";
+"A/V SYNC · 최대 MAIN +%.0f ms · MON %@\n장치 지연 기준 추정값 · 일부 경로는 보정되지 않을 수 있습니다." = "A/V SYNC · MAX MAIN +%.0f ms · MON %@\nDevice latency estimate · some routes may be uncompensated.";
+"원래 출력 확인 대기 · 확인되지 않은 경로는 보정하지 않습니다." = "Waiting for source output · unknown routes remain uncompensated.";

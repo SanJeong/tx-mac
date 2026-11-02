@@ -30,6 +30,8 @@ Keep **USB 12 IN** selected. Optional USB channel meters mirror six app channels
 
 Meters show signal level, not the master number. TX-6's own faders still affect its USB mix return.
 
+Video sync compensation estimates device latency differences for native app channels. It delays audio before volume and EQ, keeping controls responsive. Unknown or mixed source outputs may remain uncompensated. AirPlay reconnects to the same output group when its session identifier changes.
+
 Choose a MONITOR device and set each channel to Main, Monitor, Both or Off. Preview follows EQ, fader, mute and master. FX1 unmutes master; FX2 mutes both outputs. A disconnected monitor stays silent.
 
 TX-6 audio output uses one stereo pair. Six-track output and native AUX/CUE routing are not supported.

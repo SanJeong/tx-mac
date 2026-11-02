@@ -5,6 +5,7 @@
 #import <libproc.h>
 #import <stdarg.h>
 #import <time.h>
+#import <mach/mach_time.h>
 
 static AudioObjectPropertyAddress Addr(AudioObjectPropertySelector selector,AudioObjectPropertyScope scope) {
     return (AudioObjectPropertyAddress){selector,scope,kAudioObjectPropertyElementMain};
@@ -201,6 +202,29 @@ static BOOL ChannelPointer(const AudioBufferList *list,UInt32 channel,float **pt
 }
 // +3 dB applies only to USB meter audio, excluding calibrated reference tones.
 static const float USBMeterGain=1.41253754f;
+static void ReadSyncFrame(TXSyncDelay *delay,const float raw[2],float main[2],float monitor[2]) {
+    if(!delay->samples||!delay->capacity){for(int c=0;c<2;c++)main[c]=monitor[c]=raw[c];return;}
+    UInt32 available=MIN(delay->validFrames+1,delay->capacity);
+    for(int c=0;c<2;c++){
+        delay->samples[2*delay->writeIndex+c]=raw[c];
+        main[c]=delay->mainFrames<available?delay->samples[2*((delay->writeIndex+delay->capacity-delay->mainFrames)%delay->capacity)+c]:0;
+        monitor[c]=delay->monitorFrames<available?delay->samples[2*((delay->writeIndex+delay->capacity-delay->monitorFrames)%delay->capacity)+c]:0;
+    }
+    delay->writeIndex=(delay->writeIndex+1)%delay->capacity;delay->validFrames=available;
+}
+static void InvalidateSyncHistory(TXRenderState *s) {
+    for(int slot=0;slot<TX_SLOTS;slot++){s->syncDelay[slot].writeIndex=0;s->syncDelay[slot].validFrames=0;}
+}
+static void RecordSyncTimestamps(TXRenderState *s,const AudioTimeStamp *now,const AudioTimeStamp *input,const AudioTimeStamp *output) {
+    UInt32 nf=now?now->mFlags:0,inf=input?input->mFlags:0,of=output?output->mFlags:0;
+    uint64_t nh=now?now->mHostTime:0,ih=input?input->mHostTime:0,oh=output?output->mHostTime:0;
+    atomic_store_explicit(&s->syncNowFlags,nf,memory_order_relaxed);atomic_store_explicit(&s->syncInputFlags,inf,memory_order_relaxed);atomic_store_explicit(&s->syncOutputFlags,of,memory_order_relaxed);
+    atomic_store_explicit(&s->syncNowHostTime,nh,memory_order_relaxed);atomic_store_explicit(&s->syncInputHostTime,ih,memory_order_relaxed);atomic_store_explicit(&s->syncOutputHostTime,oh,memory_order_relaxed);
+    double io=0,no=0;
+    if((inf&of&kAudioTimeStampHostTimeValid)&&s->syncHostTickMS>0)io=(oh>=ih?(double)(oh-ih):-(double)(ih-oh))*s->syncHostTickMS;
+    if((nf&of&kAudioTimeStampHostTimeValid)&&s->syncHostTickMS>0)no=(oh>=nh?(double)(oh-nh):-(double)(nh-oh))*s->syncHostTickMS;
+    atomic_store_explicit(&s->syncInputToOutputMS,isfinite(io)?io:0,memory_order_relaxed);atomic_store_explicit(&s->syncNowToOutputMS,isfinite(no)?no:0,memory_order_relaxed);
+}
 static float MeterReference(uint64_t frame,double rate) {
     uint64_t length=(uint64_t)(rate*4),step=frame/length,position=frame%length;
     if(step>=3)return 0;
@@ -236,13 +260,13 @@ static void ResetLevelRecords(TXRenderState *s) {
     ClearLevelCurrent(s);ClearLevelHolds(s);atomic_store_explicit(&s->levelResetApplied,requested,memory_order_release);
 }
 static OSStatus LevelLayoutFault(TXRenderState *s,int fault) {
-    atomic_store(&s->layoutFault,fault);ClearLevelCurrent(s);return noErr;
+    atomic_store(&s->layoutFault,fault);ClearLevelCurrent(s);InvalidateSyncHistory(s);return noErr;
 }
 static float LevelReductionDB(float gain) {
     return -20*log10f(fminf(1,fmaxf(1e-9f,gain)));
 }
 static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const AudioBufferList *input,const AudioTimeStamp *it,AudioBufferList *output,const AudioTimeStamp *ot,void *context) {
-    TXRenderState *s=context;ApplyLevelPeakReset(s);
+    TXRenderState *s=context;ApplyLevelPeakReset(s);RecordSyncTimestamps(s,now,it,ot);
     if(!input||!output){return LevelLayoutFault(s,4);}
     for(UInt32 b=0;b<output->mNumberBuffers;b++)if(output->mBuffers[b].mData)memset(output->mBuffers[b].mData,0,output->mBuffers[b].mDataByteSize);
     UInt32 channels=0;for(UInt32 b=0;b<input->mNumberBuffers;b++)channels+=input->mBuffers[b].mNumberChannels;
@@ -263,7 +287,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     }
     // Validate live IO while suppressing every output during a protected transition.
     if(atomic_load(&s->transitionMuted)){
-        ClearLevelCurrent(s);
+        ClearLevelCurrent(s);InvalidateSyncHistory(s);
         atomic_fetch_add(&s->callbacks,1);atomic_fetch_add(&s->frames,frames);return noErr;
     }
     float target[TX_SLOTS],peaks[TX_SLOTS]={0},outputPeak=0,monitorPeak=0,usbPeak[6]={0};
@@ -273,7 +297,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         int slot=s->tapSlots[t];float rawGain=atomic_load(&s->gain[slot]);muted[slot]=atomic_load(&s->muted[slot]);target[t]=muted[slot]||!isfinite(rawGain)?0:fmaxf(0,fminf(1,rawGain));
         for(int b=0;b<TX_EQ;b++){
             double requested=atomic_load(&s->eq[slot][b]);requested=isfinite(requested)?fmax(-18,fmin(18,requested)):0;double delta=requested-s->currentEQ[slot][b];
-            if(fabs(delta)>0.00001){s->currentEQ[slot][b]+=fmax(-0.25,fmin(0.25,delta));SetFilter(&s->filters[slot][b],b,s->currentEQ[slot][b],s->sampleRate);}
+            if(fabs(delta)>0.00001){s->currentEQ[slot][b]+=fmax(-0.25,fmin(0.25,delta));SetFilter(&s->filters[slot][b],b,s->currentEQ[slot][b],s->sampleRate);SetFilter(&s->syncMonitorFilters[slot][b],b,s->currentEQ[slot][b],s->sampleRate);}
         }
     }
     for(int slot=0;slot<TX_SLOTS;slot++)routes[slot]=slot==6?TXOutputMain:atomic_load(&s->route[slot]);
@@ -287,14 +311,19 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
         float mix[2]={0},monitorMix[2]={0},slotPCM[6][2]={0};
         for(int t=0;t<s->tapCount;t++){
             int slot=s->tapSlots[t];s->smoothGain[slot]+=smoothing*(target[t]-s->smoothGain[slot]);
+            float raw[2]={in[t][0][f*stride[t][0]],in[t][1][f*stride[t][1]]},mainRaw[2],monitorRaw[2];
+            TXSyncDelay *delay=&s->syncDelay[slot];ReadSyncFrame(delay,raw,mainRaw,monitorRaw);
+            BOOL split=s->monitorEnabled&&delay->mainFrames!=delay->monitorFrames;
             for(int c=0;c<2;c++){
-                float value=in[t][c][f*stride[t][c]];
+                float value=mainRaw[c],monitorValue=monitorRaw[c];
                 for(int b=0;b<TX_EQ;b++)value=FilterSample(&s->filters[slot][b],c,value);
+                if(split)for(int b=0;b<TX_EQ;b++)monitorValue=FilterSample(&s->syncMonitorFilters[slot][b],c,monitorValue);
                 value*=s->smoothGain[slot];if(!isfinite(value)||muted[slot])value=0;
-                peaks[slot]=fmaxf(peaks[slot],fabsf(value));
+                if(split){monitorValue*=s->smoothGain[slot];if(!isfinite(monitorValue)||muted[slot])monitorValue=0;}else monitorValue=value;
+                peaks[slot]=fmaxf(peaks[slot],fmaxf(fabsf(value),fabsf(monitorValue)));
                 if(routes[slot]==TXOutputMain||routes[slot]==TXOutputBoth)mix[c]+=value;
-                if(s->monitorEnabled&&(routes[slot]==TXOutputMonitor||routes[slot]==TXOutputBoth))monitorMix[c]+=value;
-                if(s->meterEnabled&&slot<6)slotPCM[slot][c]=value;
+                if(s->monitorEnabled&&(routes[slot]==TXOutputMonitor||routes[slot]==TXOutputBoth))monitorMix[c]+=monitorValue;
+                if(s->meterEnabled&&slot<6)slotPCM[slot][c]=routes[slot]==TXOutputMonitor?monitorValue:value;
             }
         }
         s->smoothMaster+=smoothing*(master-s->smoothMaster);
@@ -662,6 +691,103 @@ static NSArray<NSDictionary*> *CreateProcessTapSet(NSArray<NSDictionary*> *plan,
 }
 static void DestroyProcessTapSet(NSMutableArray<NSNumber*> *owned,TXGuardDestroy destroy) {for(NSNumber *tap in owned)destroy(tap.unsignedIntValue);[owned removeAllObjects];}
 
+static const double SyncMaxSeconds=2;
+static const size_t SyncMaxBytes=16*1024*1024;
+static BOOL SyncReadU32(AudioObjectID object,AudioObjectPropertySelector selector,AudioObjectPropertyScope scope,UInt32 *value) {
+    UInt32 size=sizeof(*value);AudioObjectPropertyAddress address=Addr(selector,scope);
+    return AudioObjectGetPropertyData(object,&address,0,NULL,&size,value)==noErr&&size==sizeof(*value);
+}
+static NSDictionary *SyncDeviceTiming(AudioDeviceID device) {
+    NSString *uid=device?ReadString(device,kAudioDevicePropertyDeviceUID):@"";NSString *reason=@"missing-device";
+    Float64 rate=0;UInt32 deviceFrames=0,streamFrames=0,safety=0,buffer=0,alive=0;BOOL supported=NO;
+    do{
+        if(!uid.length||[uid hasPrefix:@"local.tx6mac."])break;
+        reason=@"missing-device-timing";UInt32 size=sizeof(rate);AudioObjectPropertyAddress address=Addr(kAudioDevicePropertyNominalSampleRate,kAudioObjectPropertyScopeGlobal);
+        if(AudioObjectGetPropertyData(device,&address,0,NULL,&size,&rate)!=noErr||size!=sizeof(rate)||!isfinite(rate)||rate<8000||rate>384000)break;
+        if(!SyncReadU32(device,kAudioDevicePropertyDeviceIsAlive,kAudioObjectPropertyScopeGlobal,&alive)||!alive)break;
+        if(!SyncReadU32(device,kAudioDevicePropertyLatency,kAudioDevicePropertyScopeOutput,&deviceFrames))break;
+        reason=@"missing-safety-offset";if(!SyncReadU32(device,kAudioDevicePropertySafetyOffset,kAudioDevicePropertyScopeOutput,&safety)||safety>rate*60)break;
+        SyncReadU32(device,kAudioDevicePropertyBufferFrameSize,kAudioObjectPropertyScopeGlobal,&buffer);
+        NSArray *streams=ReadIDs(device,kAudioDevicePropertyStreams,kAudioDevicePropertyScopeOutput);UInt32 channels=Channels(device,kAudioDevicePropertyScopeOutput);
+        reason=@"invalid-output-streams";if(!streams.count||channels<2)break;
+        NSMutableIndexSet *covered=[NSMutableIndexSet indexSet];BOOL valid=YES,first=YES;
+        for(NSNumber *stream in streams){UInt32 latency=0,start=0;AudioStreamBasicDescription format={0};size=sizeof(format);address=Addr(kAudioStreamPropertyVirtualFormat,kAudioObjectPropertyScopeGlobal);
+            if(AudioObjectGetPropertyData(stream.unsignedIntValue,&address,0,NULL,&size,&format)!=noErr||size!=sizeof(format)||!isfinite(format.mSampleRate)||fabs(format.mSampleRate-rate)>.001||!SyncReadU32(stream.unsignedIntValue,kAudioStreamPropertyStartingChannel,kAudioObjectPropertyScopeGlobal,&start)||!AddStreamRange(covered,start,format.mChannelsPerFrame,channels,0)){valid=NO;break;}
+            reason=@"missing-stream-latency";if(!SyncReadU32(stream.unsignedIntValue,kAudioStreamPropertyLatency,kAudioObjectPropertyScopeGlobal,&latency)){valid=NO;break;}
+            if(!first&&latency!=streamFrames){reason=@"multiple-stream-latencies";valid=NO;break;}streamFrames=latency;first=NO;
+        }
+        if(!valid||covered.count!=channels)break;
+        reason=@"invalid-latency";if(((double)deviceFrames+streamFrames)/rate>60)break;
+        supported=YES;reason=@"known";
+    }while(0);
+    double seconds=supported?((double)deviceFrames+streamFrames)/rate:0;
+    NSString *signature=[NSString stringWithFormat:@"%@|%.6f|%u|%u|%d|%@",uid,isfinite(rate)?rate:0,deviceFrames,streamFrames,supported,reason];
+    return @{@"id":@(device),@"uid":uid,@"supported":@(supported),@"reason":reason,@"sampleRate":isfinite(rate)?@(rate):@0,@"deviceFrames":@(deviceFrames),@"streamFrames":@(streamFrames),@"safetyFrames":@(safety),@"bufferFrames":@(buffer),@"seconds":@(seconds),@"signature":signature};
+}
+static NSDictionary *SyncCachedTiming(AudioDeviceID device,NSMutableDictionary *cache) {
+    NSNumber *key=@(device);NSDictionary *timing=cache[key];if(!timing){timing=SyncDeviceTiming(device);cache[key]=timing;}return timing;
+}
+static NSArray *SyncProcessDevices(AudioObjectID process) {
+    AudioObjectPropertyAddress address=Addr(kAudioProcessPropertyDevices,kAudioDevicePropertyScopeOutput);UInt32 size=0;
+    if(AudioObjectGetPropertyDataSize(process,&address,0,NULL,&size)!=noErr||!size||size%sizeof(AudioDeviceID)||size>256*sizeof(AudioDeviceID))return @[];
+    AudioDeviceID *devices=malloc(size);if(!devices)return @[];UInt32 capacity=size;NSMutableArray *result=[NSMutableArray array];
+    OSStatus status=AudioObjectGetPropertyData(process,&address,0,NULL,&size,devices);
+    if(status==noErr&&size<=capacity&&!(size%sizeof(*devices)))for(UInt32 i=0;i<size/sizeof(*devices);i++)[result addObject:@(devices[i])];free(devices);return result;
+}
+static NSDictionary *SyncMergeSources(NSArray<NSDictionary*> *snapshots) {
+    NSMutableSet *uids=[NSMutableSet set];NSMutableArray *signatures=[NSMutableArray array];NSDictionary *selected=nil;NSString *reason=@"inactive-source";BOOL invalid=NO;NSUInteger active=0;
+    for(NSDictionary *snapshot in snapshots){NSNumber *process=snapshot[@"process"];
+        if(![snapshot[@"known"] boolValue]){invalid=YES;reason=@"unknown-process-state";[signatures addObject:[NSString stringWithFormat:@"%@:unknown",process]];continue;}
+        if(![snapshot[@"active"] boolValue]){[signatures addObject:[NSString stringWithFormat:@"%@:inactive",process]];continue;}
+        active++;NSArray *devices=snapshot[@"timings"];NSMutableArray *parts=[NSMutableArray array];
+        if(devices.count!=1){invalid=YES;reason=devices.count?@"multiple-source-devices":@"unknown-source-device";}
+        for(NSDictionary *timing in devices){[parts addObject:timing[@"signature"]];NSString *uid=timing[@"uid"];if(uid.length)[uids addObject:uid];
+            if(![timing[@"supported"] boolValue]){invalid=YES;reason=timing[@"reason"];}
+            else{if(selected&&[selected[@"uid"] isEqual:uid]&&fabs([selected[@"seconds"] doubleValue]-[timing[@"seconds"] doubleValue])>1e-9){invalid=YES;reason=@"inconsistent-source-timing";}selected=timing;}
+        }
+        [signatures addObject:[NSString stringWithFormat:@"%@:%@",process,[[parts sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@","]]];
+    }
+    if(uids.count>1){invalid=YES;reason=@"multiple-source-devices";}
+    BOOL supported=active&&!invalid&&uids.count==1&&selected;
+    if(supported)reason=@"known";
+    return @{@"supported":@(supported),@"reason":reason,@"uid":supported?selected[@"uid"]:@"",@"deviceUIDs":[uids.allObjects sortedArrayUsingSelector:@selector(compare:)],@"seconds":supported?selected[@"seconds"]:@0,@"timing":selected?:@{},@"signature":[[signatures sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@";"]};
+}
+static NSDictionary *SyncGroupSource(NSArray<NSNumber*> *processes,NSMutableDictionary *cache) {
+    NSMutableArray *snapshots=[NSMutableArray array];
+    for(NSNumber *process in processes){UInt32 running=0;BOOL known=SyncReadU32(process.unsignedIntValue,kAudioProcessPropertyIsRunningOutput,kAudioObjectPropertyScopeGlobal,&running);NSMutableArray *timings=[NSMutableArray array];
+        if(known&&running)for(NSNumber *device in SyncProcessDevices(process.unsignedIntValue))[timings addObject:SyncCachedTiming(device.unsignedIntValue,cache)];
+        [snapshots addObject:@{@"process":process,@"known":@(known),@"active":@(running!=0),@"timings":timings}];
+    }
+    return SyncMergeSources(snapshots);
+}
+static NSDictionary *SyncDelayPlan(NSDictionary *source,NSDictionary *target,double rate,BOOL enabled) {
+    double desired=0;UInt32 frames=0;NSString *reason=@"disabled";BOOL supported=YES;
+    if(enabled){
+        if(![source[@"supported"] boolValue]){reason=[@"source-" stringByAppendingString:source[@"reason"]?:@"unknown"];supported=NO;}
+        else if(![target[@"supported"] boolValue]){reason=[@"target-" stringByAppendingString:target[@"reason"]?:@"unknown"];supported=NO;}
+        else if([source[@"uid"] isEqual:target[@"uid"]])reason=@"same-device";
+        else if(!isfinite(rate)||rate<8000||rate>384000){reason=@"invalid-render-rate";supported=NO;}
+        else{
+            double sourceSeconds=[source[@"seconds"] doubleValue],targetSeconds=[target[@"seconds"] doubleValue];
+            desired=sourceSeconds-targetSeconds;
+            if(!isfinite(desired)||sourceSeconds<0||targetSeconds<0){desired=0;reason=@"invalid-latency";supported=NO;}
+            else if(desired<=0){reason=@"target-not-faster";supported=NO;}
+            else{frames=(UInt32)llround(fmin(SyncMaxSeconds,desired)*rate);reason=desired>SyncMaxSeconds?@"delay-clamped":@"compensated-estimate";supported=desired<=SyncMaxSeconds;}
+        }
+    }
+    return @{@"supported":@(supported),@"reason":reason,@"requestedMs":@(desired*1000),@"frames":@(frames),@"delayMs":@(frames&&rate>0?1000.0*frames/rate:0)};
+}
+static NSString *AllocateSyncBuffer(TXSyncDelay *delay,UInt32 mainFrames,UInt32 monitorFrames,size_t *allocated) {
+    UInt32 maximum=MAX(mainFrames,monitorFrames);if(!maximum)return nil;
+    if(maximum>384000*SyncMaxSeconds||*allocated>SyncMaxBytes)return @"memory-limit";
+    size_t bytes=((size_t)maximum+1)*2*sizeof(float);if(bytes>SyncMaxBytes-*allocated)return @"memory-limit";
+    delay->samples=calloc(1,bytes);if(!delay->samples)return @"allocation-failed";
+    volatile float *warm=delay->samples;for(size_t i=0;i<bytes/sizeof(float);i+=1024)warm[i]=0;warm[bytes/sizeof(float)-1]=0;
+    *allocated+=bytes;delay->capacity=maximum+1;delay->mainFrames=mainFrames;delay->monitorFrames=monitorFrames;return nil;
+}
+static NSDictionary *SyncRejectPlan(NSDictionary *plan,NSString *reason) {
+    NSMutableDictionary *result=[plan mutableCopy];result[@"supported"]=@NO;result[@"reason"]=reason;result[@"frames"]=@0;result[@"delayMs"]=@0;return [result copy];
+}
 @implementation TXAudio {
     TXRenderState *_state;
     NSArray<NSArray<NSString*>*> *_slotBundleIDs;
@@ -671,8 +797,9 @@ static void DestroyProcessTapSet(NSMutableArray<NSNumber*> *owned,TXGuardDestroy
     CATapDescription *_globalDescription;
     AudioObjectID _globalTap;
     BOOL _running;
+    NSDictionary *_syncPlan;
 }
-- (instancetype)init {if((self=[super init])){_state=calloc(1,sizeof(*_state));_taps=[NSMutableArray array];atomic_store(&_state->master,1);atomic_store(&_state->monitorGain,1);for(int i=0;i<TX_SLOTS;i++)atomic_store(&_state->gain[i],1);}return self;}
+- (instancetype)init {if((self=[super init])){_state=calloc(1,sizeof(*_state));_taps=[NSMutableArray array];_syncCompensationEnabled=YES;atomic_store(&_state->master,1);atomic_store(&_state->monitorGain,1);for(int i=0;i<TX_SLOTS;i++)atomic_store(&_state->gain[i],1);}return self;}
 - (TXRenderState*)state{return _state;}
 - (NSArray<NSArray<NSString*>*>*)slotBundleIDs{return _slotBundleIDs;}
 - (void)setSlotBundleIDs:(NSArray<NSArray<NSString*>*>*)value {_slotBundleIDs=CopySlotBundleIDs(value);}
@@ -680,6 +807,26 @@ static void DestroyProcessTapSet(NSMutableArray<NSNumber*> *owned,TXGuardDestroy
 - (AudioDeviceID)device{return _device;}
 - (BOOL)metering{return _running&&_state->meterEnabled;}
 - (BOOL)monitoring{return _running&&_state->monitorEnabled;}
+- (NSDictionary*)syncDiagnostics {
+    NSMutableDictionary *result=[(_syncPlan?:@{@"enabled":@(_syncCompensationEnabled),@"slots":@[]}) mutableCopy];result[@"running"]=@(_running);result[@"requestedEnabled"]=@(_syncCompensationEnabled);
+    result[@"timestamp"]=@{@"nowFlags":@(atomic_load(&_state->syncNowFlags)),@"inputFlags":@(atomic_load(&_state->syncInputFlags)),@"outputFlags":@(atomic_load(&_state->syncOutputFlags)),@"nowHostTime":@(atomic_load(&_state->syncNowHostTime)),@"inputHostTime":@(atomic_load(&_state->syncInputHostTime)),@"outputHostTime":@(atomic_load(&_state->syncOutputHostTime)),@"inputToOutputMs":@(atomic_load(&_state->syncInputToOutputMS)),@"nowToOutputMs":@(atomic_load(&_state->syncNowToOutputMS))};return [result copy];
+}
+- (void)configureSyncGroups:(NSArray*)groups taps:(NSArray*)created main:(AudioDeviceID)main monitor:(AudioDeviceID)monitor rate:(double)rate {
+    NSMutableDictionary *cache=[NSMutableDictionary dictionary];NSDictionary *mainTiming=SyncCachedTiming(main,cache),*monitorTiming=monitor?SyncCachedTiming(monitor,cache):@{};
+    NSMutableArray *rows=[NSMutableArray array];NSMutableDictionary *descriptions=[NSMutableDictionary dictionary];for(NSDictionary *entry in created)descriptions[entry[@"slot"]]=entry[@"description"];
+    NSArray *allProcesses=ReadIDs(kAudioObjectSystemObject,kAudioHardwarePropertyProcessObjectList,kAudioObjectPropertyScopeGlobal);size_t allocated=0;
+    mach_timebase_info_data_t timebase={0};if(mach_timebase_info(&timebase)==KERN_SUCCESS&&timebase.denom)_state->syncHostTickMS=(double)timebase.numer/timebase.denom/1000000;
+    for(int slot=0;slot<TX_SLOTS;slot++){
+        CATapDescription *description=descriptions[@(slot)];NSMutableOrderedSet *sources=[NSMutableOrderedSet orderedSetWithArray:slot<6?groups[slot]:@[]];
+        if(slot<6&&description.bundleIDs.count)for(NSNumber *process in allProcesses)if([description.bundleIDs containsObject:ReadString(process.unsignedIntValue,kAudioProcessPropertyBundleID)])[sources addObject:process];
+        NSDictionary *source=slot<6&&description?SyncGroupSource(sources.array,cache):@{@"supported":@NO,@"uid":@"",@"reason":slot==6?@"global-remainder":@"no-tap",@"seconds":@0};
+        NSDictionary *mainPlan=SyncDelayPlan(source,mainTiming,rate,_syncCompensationEnabled),*monitorPlan=monitor?SyncDelayPlan(source,monitorTiming,rate,_syncCompensationEnabled):SyncRejectPlan(SyncDelayPlan(source,@{},rate,NO),@"monitor-disabled");
+        NSString *allocationReason=AllocateSyncBuffer(&_state->syncDelay[slot],[mainPlan[@"frames"] unsignedIntValue],[monitorPlan[@"frames"] unsignedIntValue],&allocated);
+        if(allocationReason){mainPlan=SyncRejectPlan(mainPlan,allocationReason);monitorPlan=SyncRejectPlan(monitorPlan,allocationReason);}
+        [rows addObject:@{@"slot":@(slot),@"sourceUID":source[@"uid"]?:@"",@"source":source,@"mainTargetUID":mainTiming[@"uid"]?:@"",@"monitorTargetUID":monitorTiming[@"uid"]?:@"",@"mainDelayMs":mainPlan[@"delayMs"],@"monitorDelayMs":monitorPlan[@"delayMs"],@"main":mainPlan,@"monitor":monitorPlan}];
+    }
+    _syncPlan=@{@"enabled":@(_syncCompensationEnabled),@"model":@"device-stream-estimate",@"timestampCompensation":@"not-inferred",@"mainTarget":mainTiming,@"monitorTarget":monitorTiming,@"slots":[rows copy],@"memoryBytes":@(allocated),@"maxDelayMs":@(SyncMaxSeconds*1000)};
+}
 + (AudioDeviceID)defaultOutput{return ReadUInt(kAudioObjectSystemObject,kAudioHardwarePropertyDefaultOutputDevice);}
 + (NSString*)uid:(AudioDeviceID)device{return ReadString(device,kAudioDevicePropertyDeviceUID);}
 + (NSArray<NSDictionary*>*)outputs {
@@ -687,7 +834,7 @@ static void DestroyProcessTapSet(NSMutableArray<NSNumber*> *owned,TXGuardDestroy
     for(NSNumber *n in ReadIDs(kAudioObjectSystemObject,kAudioHardwarePropertyDevices,kAudioObjectPropertyScopeGlobal)){
         AudioDeviceID d=n.unsignedIntValue;UInt32 count=Channels(d,kAudioDevicePropertyScopeOutput);
         NSString *uid=[self uid:d];if(count<2||[uid hasPrefix:@"local.tx6mac."])continue;
-        [result addObject:@{@"id":n,@"name":ReadString(d,kAudioObjectPropertyName),@"uid":uid,@"channels":@(count),@"transport":@(ReadUInt(d,kAudioDevicePropertyTransportType))}];
+        [result addObject:@{@"id":n,@"name":ReadString(d,kAudioObjectPropertyName),@"uid":uid,@"channels":@(count),@"transport":@(ReadUInt(d,kAudioDevicePropertyTransportType)),@"timingSignature":SyncDeviceTiming(d)[@"signature"]}];
     }return result;
 }
 + (NSArray<NSDictionary*>*)processes {
@@ -710,6 +857,7 @@ static void DestroyProcessTapSet(NSMutableArray<NSNumber*> *owned,TXGuardDestroy
         [g[@"ids"] addObject:n];if(bundle.length&&![g[@"bundles"] containsObject:bundle])[g[@"bundles"] addObject:bundle];
         if(ReadUInt(obj,kAudioProcessPropertyIsRunningOutput))g[@"active"]=@YES;
     }
+    NSMutableDictionary *timings=[NSMutableDictionary dictionary];for(NSMutableDictionary *group in groups.allValues){NSDictionary *source=SyncGroupSource(group[@"ids"],timings);group[@"sourceSinkSignature"]=source[@"signature"];}
     return [groups.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b){return [a[@"name"] localizedCaseInsensitiveCompare:b[@"name"]];}];
 }
 + (NSDictionary*)diagnostics {return @{@"outputs":[self outputs],@"processes":[self processes],@"defaultOutput":@([self defaultOutput])};}
@@ -799,7 +947,8 @@ static void DestroyProcessTapSet(NSMutableArray<NSNumber*> *owned,TXGuardDestroy
     atomic_store(&_state->layoutFault,0);atomic_store(&_state->callbacks,0);atomic_store(&_state->frames,0);
     atomic_store(&_state->outputPeak,0);atomic_store(&_state->monitorPeak,0);_state->smoothMaster=0;_state->limiterGain=1;
     _state->smoothMonitorGain=0;_state->monitorLimiterGain=1;atomic_store(&_state->limitedFrames,0);
-    for(int slot=0;slot<TX_SLOTS;slot++){_state->smoothGain[slot]=0;for(int b=0;b<TX_EQ;b++){memset(&_state->filters[slot][b],0,sizeof(TXFilter));_state->currentEQ[slot][b]=atomic_load(&_state->eq[slot][b]);SetFilter(&_state->filters[slot][b],b,_state->currentEQ[slot][b],rate);}}
+    for(int slot=0;slot<TX_SLOTS;slot++){_state->smoothGain[slot]=0;for(int b=0;b<TX_EQ;b++){memset(&_state->filters[slot][b],0,sizeof(TXFilter));_state->currentEQ[slot][b]=atomic_load(&_state->eq[slot][b]);SetFilter(&_state->filters[slot][b],b,_state->currentEQ[slot][b],rate);memset(&_state->syncMonitorFilters[slot][b],0,sizeof(TXFilter));SetFilter(&_state->syncMonitorFilters[slot][b],b,_state->currentEQ[slot][b],rate);}}
+    [self configureSyncGroups:groups taps:created main:device monitor:monitor rate:rate];
     status=AudioDeviceCreateIOProcID(_aggregate,Render,_state,&_proc);if(status!=noErr)return [self fail:TXL(@"오디오 처리 연결") status:status];
     // Disable hardware inputs; capture only the authorized process taps.
     status=UseOnlyTapInputs(_aggregate,_proc,_state->physicalInputChannels,_state->physicalInputChannels+2*_state->tapCount);
@@ -825,6 +974,8 @@ static void DestroyProcessTapSet(NSMutableArray<NSNumber*> *owned,TXGuardDestroy
     _state->meterEnabled=NO;_state->meterOutputOffset=0;_state->monitorEnabled=NO;_state->monitorLeft=0;_state->monitorRight=0;
     _state->tapCount=0;_state->physicalInputChannels=0;
     _state->meterReferenceFrame=0;
+    for(int slot=0;slot<TX_SLOTS;slot++){free(_state->syncDelay[slot].samples);memset(&_state->syncDelay[slot],0,sizeof(TXSyncDelay));}
+    _syncPlan=nil;_state->syncHostTickMS=0;RecordSyncTimestamps(_state,NULL,NULL,NULL);
     ResetLevelRecords(_state);
     atomic_store(&_state->callbacks,0);atomic_store(&_state->frames,0);atomic_store(&_state->limitedFrames,0);atomic_store(&_state->layoutFault,0);
 }
@@ -1060,6 +1211,42 @@ BOOL TXRunSelfCheck(void) {
     dispatch_semaphore_wait(guardFinished,DISPATCH_TIME_FOREVER);
     if(!guardOK){fprintf(stderr,"Mute guard lifecycle self-check failed.\n");return NO;}
 
+    float syncMemory[8]={0},syncRaw[2]={.25f,-.125f},syncMain[2],syncMonitor[2];
+    TXSyncDelay syncTest={.samples=syncMemory,.capacity=4,.mainFrames=2,.monitorFrames=0};
+    ReadSyncFrame(&syncTest,syncRaw,syncMain,syncMonitor);
+    if(syncMain[0]!=0||syncMain[1]!=0||syncMonitor[0]!=.25f||syncMonitor[1]!=-.125f){fprintf(stderr,"Raw PCM delay did not prefill silence independently per bus\n");return NO;}
+    memset(syncMemory,0,sizeof(syncMemory));syncTest.writeIndex=syncTest.validFrames=0;
+    for(int f=0;f<20;f++){syncRaw[0]=.01f*(f+1);syncRaw[1]=-syncRaw[0]*.5f;ReadSyncFrame(&syncTest,syncRaw,syncMain,syncMonitor);
+        float expected=f<2?0:.01f*(f-1);if(fabsf(syncMain[0]-expected)>1e-7||fabsf(syncMain[1]+expected*.5f)>1e-7||syncMonitor[0]!=syncRaw[0])return NO;
+    }
+    syncTest.monitorFrames=3;syncRaw[0]=.21f;syncRaw[1]=-.105f;ReadSyncFrame(&syncTest,syncRaw,syncMain,syncMonitor);
+    if(fabsf(syncMain[0]-.19f)>1e-7||fabsf(syncMonitor[0]-.18f)>1e-7)return NO;
+    TXRenderState syncTiming={0};syncTiming.syncDelay[0]=syncTest;InvalidateSyncHistory(&syncTiming);ReadSyncFrame(&syncTiming.syncDelay[0],syncRaw,syncMain,syncMonitor);
+    if(syncMain[0]!=0||syncMonitor[0]!=0)return NO;
+    syncTiming.syncHostTickMS=.01;AudioTimeStamp syncNow={.mHostTime=1000,.mFlags=kAudioTimeStampHostTimeValid},syncInput={.mHostTime=900,.mFlags=kAudioTimeStampHostTimeValid},syncOutput={.mHostTime=1200,.mFlags=kAudioTimeStampHostTimeValid};
+    RecordSyncTimestamps(&syncTiming,&syncNow,&syncInput,&syncOutput);
+    if(atomic_load(&syncTiming.syncInputToOutputMS)!=3||atomic_load(&syncTiming.syncNowToOutputMS)!=2||syncTiming.syncDelay[0].mainFrames!=2)return NO;
+    syncOutput.mHostTime=800;RecordSyncTimestamps(&syncTiming,&syncNow,&syncInput,&syncOutput);
+    if(atomic_load(&syncTiming.syncInputToOutputMS)!=-1||atomic_load(&syncTiming.syncNowToOutputMS)!=-2)return NO;
+    syncInput.mFlags=0;RecordSyncTimestamps(&syncTiming,&syncNow,&syncInput,&syncOutput);
+    if(atomic_load(&syncTiming.syncInputToOutputMS)!=0||atomic_load(&syncTiming.syncInputFlags)!=0||atomic_load(&syncTiming.syncInputHostTime)!=900)return NO;
+    NSDictionary *airTiming=@{@"uid":@"air",@"seconds":@.425,@"supported":@YES,@"reason":@"known",@"signature":@"air|48000|0|20400|1|known"};
+    NSDictionary *studioTiming=@{@"uid":@"studio",@"seconds":@.022,@"supported":@YES,@"reason":@"known",@"signature":@"studio|48000|0|1056|1|known"};
+    NSDictionary *sourceKnown=@{@"uid":@"air",@"seconds":@.425,@"supported":@YES},*syncPlan=SyncDelayPlan(sourceKnown,studioTiming,48000,YES);
+    if([syncPlan[@"frames"] unsignedIntValue]!=19344||fabs([syncPlan[@"delayMs"] doubleValue]-403)>1e-9||![syncPlan[@"supported"] boolValue])return NO;
+    if([SyncDelayPlan(sourceKnown,airTiming,48000,YES)[@"frames"] unsignedIntValue]||[SyncDelayPlan(sourceKnown,studioTiming,48000,NO)[@"frames"] unsignedIntValue])return NO;
+    NSDictionary *negative=SyncDelayPlan(studioTiming,airTiming,48000,YES),*unknown=SyncDelayPlan(@{@"supported":@NO,@"reason":@"multiple-source-devices"},studioTiming,48000,YES);
+    if([negative[@"frames"] unsignedIntValue]||![negative[@"reason"] isEqual:@"target-not-faster"]||[unknown[@"frames"] unsignedIntValue]||![unknown[@"reason"] isEqual:@"source-multiple-source-devices"])return NO;
+    NSDictionary *clamped=SyncDelayPlan(@{@"uid":@"slow",@"seconds":@3,@"supported":@YES},studioTiming,48000,YES);
+    if([clamped[@"frames"] unsignedIntValue]!=96000||[clamped[@"supported"] boolValue]||![clamped[@"reason"] isEqual:@"delay-clamped"])return NO;
+    if([SyncDelayPlan(sourceKnown,studioTiming,384001,YES)[@"frames"] unsignedIntValue]||[SyncDelayPlan(@{@"uid":@"invalid",@"seconds":@(NAN),@"supported":@YES},studioTiming,48000,YES)[@"frames"] unsignedIntValue])return NO;
+    NSDictionary *oneSource=@{@"process":@1,@"known":@YES,@"active":@YES,@"timings":@[airTiming]},*inactiveSource=@{@"process":@2,@"known":@YES,@"active":@NO,@"timings":@[]};
+    NSDictionary *merged=SyncMergeSources(@[oneSource,inactiveSource]);if(![merged[@"supported"] boolValue]||![merged[@"uid"] isEqual:@"air"])return NO;
+    NSDictionary *otherSource=@{@"process":@3,@"known":@YES,@"active":@YES,@"timings":@[studioTiming]};
+    if([SyncMergeSources(@[oneSource,otherSource])[@"supported"] boolValue]||[SyncMergeSources(@[@{@"process":@1,@"known":@YES,@"active":@YES,@"timings":@[airTiming,studioTiming]}])[@"supported"] boolValue]||[SyncMergeSources(@[oneSource,@{@"process":@2,@"known":@NO}])[@"supported"] boolValue]||[SyncMergeSources(@[@{@"process":@1,@"known":@YES,@"active":@YES,@"timings":@[]}])[@"supported"] boolValue])return NO;
+    TXSyncDelay allocatedSync={0};size_t syncBytes=SyncMaxBytes-8;
+    if(![AllocateSyncBuffer(&allocatedSync,2,0,&syncBytes) isEqual:@"memory-limit"]||allocatedSync.samples)return NO;
+    syncBytes=0;if(AllocateSyncBuffer(&allocatedSync,2,3,&syncBytes)||syncBytes!=32||allocatedSync.capacity!=4)return NO;free(allocatedSync.samples);
     UInt32 po=0,no=0,mo=0,ic=0,oc=0;NSDictionary *counts=@{@"main":@{@"in":@1,@"out":@2},@"meter":@{@"in":@12,@"out":@12}};
     if(!OutputLayout(@[@"main",@"meter"],@"main",@"",@"meter",counts,&po,&no,&mo,&ic,&oc)||po!=0||mo!=2||ic!=13||oc!=14)return NO;
     if(!OutputLayout(@[@"meter",@"main"],@"main",@"",@"meter",counts,&po,&no,&mo,&ic,&oc)||po!=12||mo!=0||ic!=13||oc!=14)return NO;
@@ -1226,6 +1413,41 @@ BOOL TXRunSelfCheck(void) {
     for(int f=0;f<64;f++){source[2*f]=.1f;source[2*f+1]=-.05f;remainder[2*f]=.2f;remainder[2*f+1]=-.1f;}
     struct{UInt32 count;AudioBuffer buf[2];} ri={2,{{2,sizeof(source),source},{2,sizeof(remainder),remainder}}};
     struct{UInt32 count;AudioBuffer buf[3];} ro={3,{{2,64*2*sizeof(float),buses},{2,64*2*sizeof(float),buses+128},{12,64*12*sizeof(float),buses+256}}};
+#define SYNC_EXPECT(condition) do{if(!(condition)){fprintf(stderr,"A/V sync render self-check failed at line %d\n",__LINE__);return NO;}}while(0)
+    TXRenderState delayed;memcpy(&delayed,&routed,sizeof(delayed));atomic_store(&delayed.route[0],TXOutputBoth);
+    float delayedRing[8]={0},delayedSource[128]={0},delayedRemainder[128]={0};delayedSource[0]=.1f;delayedSource[1]=-.05f;
+    delayed.syncDelay[0]=(TXSyncDelay){.samples=delayedRing,.capacity=4,.mainFrames=2};
+    struct{UInt32 count;AudioBuffer buf[2];} delayedInput={2,{{2,sizeof(delayedSource),delayedSource},{2,sizeof(delayedRemainder),delayedRemainder}}};
+    atomic_store(&delayed.eq[0][1],18);delayed.currentEQ[0][1]=18;
+    for(int band=0;band<TX_EQ;band++){SetFilter(&delayed.filters[0][band],band,band==1?18:0,48000);SetFilter(&delayed.syncMonitorFilters[0][band],band,band==1?18:0,48000);}
+    Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
+    float mainDelayOutput[128];memcpy(mainDelayOutput,buses,sizeof(mainDelayOutput));
+    SYNC_EXPECT(fabsf(buses[0])<1e-7&&fabsf(buses[2])<1e-7&&fabsf(buses[128])>.1f);
+    for(int f=2;f<64;f++)SYNC_EXPECT(fabsf(mainDelayOutput[2*f]-buses[128+2*(f-2)])<1e-6&&fabsf(mainDelayOutput[2*f+1]-buses[129+2*(f-2)])<1e-6&&fabsf(buses[256+12*f]-mainDelayOutput[2*f]*1.41253754f)<1e-6);
+    memcpy(&delayed,&routed,sizeof(delayed));atomic_store(&delayed.route[0],TXOutputBoth);memset(delayedRing,0,sizeof(delayedRing));delayed.syncDelay[0]=(TXSyncDelay){.samples=delayedRing,.capacity=4,.mainFrames=2};
+    for(int band=0;band<TX_EQ;band++)SetFilter(&delayed.syncMonitorFilters[0][band],band,0,48000);
+    for(int f=0;f<64;f++){delayedSource[2*f]=.1f;delayedSource[2*f+1]=-.05f;}
+    Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
+    atomic_store(&delayed.gain[0],0);
+    Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
+    float immediateGain=expf(-1/(.015f*48000));SYNC_EXPECT(fabsf(buses[0]-.1f*immediateGain)<1e-6&&buses[0]<.1f);
+    atomic_store(&delayed.muted[0],true);
+    Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
+    for(int i=0;i<16*64;i++)SYNC_EXPECT(buses[i]==0);
+    atomic_store(&delayed.muted[0],false);atomic_store(&delayed.gain[0],1);delayed.smoothGain[0]=1;atomic_store(&delayed.eq[0][1],18);
+    Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
+    SYNC_EXPECT(delayed.currentEQ[0][1]==.25&&fabs(buses[0]-.1f*delayed.filters[0][1].b0)<1e-6&&buses[0]>.1f);
+    memcpy(&delayed,&routed,sizeof(delayed));atomic_store(&delayed.route[0],TXOutputBoth);memset(delayedRing,0,sizeof(delayedRing));delayed.syncDelay[0]=(TXSyncDelay){.samples=delayedRing,.capacity=4,.mainFrames=2};
+    for(int band=0;band<TX_EQ;band++)SetFilter(&delayed.syncMonitorFilters[0][band],band,0,48000);
+    Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
+    atomic_store(&delayed.transitionMuted,true);Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
+    SYNC_EXPECT(delayed.syncDelay[0].validFrames==0);
+    atomic_store(&delayed.transitionMuted,false);Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
+    SYNC_EXPECT(fabsf(buses[0])<1e-7&&fabsf(buses[2])<1e-7&&fabsf(buses[4]-.1f)<1e-6);
+    delayedInput.buf[0].mData=NULL;Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
+    SYNC_EXPECT(atomic_load(&delayed.layoutFault)==3&&delayed.syncDelay[0].validFrames==0);
+    delayedInput.buf[0].mData=delayedSource;
+#undef SYNC_EXPECT
 #define LEVEL_EXPECT(condition) do{if(!(condition)){fprintf(stderr,"Level telemetry self-check failed at line %d\n",__LINE__);return NO;}}while(0)
     TXRenderState levels;memcpy(&levels,&routed,sizeof(levels));atomic_store(&levels.route[0],TXOutputBoth);
     float levelSource[2]={1.25f,-.625f},levelRemainder[2]={0,0};
@@ -1432,8 +1654,11 @@ BOOL TXRunSelfCheck(void) {
     atomic_store(&controls.state->mainPreLimiterPeak,2);atomic_store(&controls.state->mainPreLimiterHold,3);atomic_store(&controls.state->mainGainReductionDB,6);
     atomic_store(&controls.state->monitorPreLimiterPeak,2);atomic_store(&controls.state->monitorPreLimiterHold,3);atomic_store(&controls.state->monitorGainReductionDB,6);
     uint64_t stoppedReset=TXRequestLevelPeakReset(controls.state);
+    if(!controls.syncCompensationEnabled)return NO;controls.syncCompensationEnabled=NO;size_t ownedSyncBytes=0;
+    if(AllocateSyncBuffer(&controls.state->syncDelay[0],2,1,&ownedSyncBytes))return NO;controls.state->syncDelay[0].validFrames=2;atomic_store(&controls.state->syncInputFlags,kAudioTimeStampHostTimeValid);
     atomic_store(&controls.state->monitorPeak,.9f);atomic_store(&controls.state->usbPeak[0],.8f);[controls stop];
     if(controls.monitoring||controls.state->monitorEnabled||controls.state->meterEnabled||atomic_load(&controls.state->monitorPeak)!=0||atomic_load(&controls.state->usbPeak[0])!=0||atomic_load(&controls.state->route[0])!=TXOutputBoth||atomic_load(&controls.state->monitorGain)!=.4f||atomic_load(&controls.state->master)!=.7f||atomic_load(&controls.state->gain[0])!=.6f)return NO;
+    if(controls.syncCompensationEnabled||controls.state->syncDelay[0].samples||controls.state->syncDelay[0].capacity||controls.state->syncDelay[0].validFrames||atomic_load(&controls.state->syncInputFlags))return NO;
     if(atomic_load(&controls.state->levelResetApplied)!=stoppedReset||atomic_load(&controls.state->mainPreLimiterPeak)||atomic_load(&controls.state->mainPreLimiterHold)||atomic_load(&controls.state->mainGainReductionDB)||atomic_load(&controls.state->monitorPreLimiterPeak)||atomic_load(&controls.state->monitorPreLimiterHold)||atomic_load(&controls.state->monitorGainReductionDB))return NO;
     for(int slot=0;slot<TX_SLOTS;slot++)if(atomic_load(&controls.state->channelPeakHold[slot])||atomic_load(&controls.state->channelOver[slot]))return NO;
     atomic_store(&controls.state->channelPeakHold[0],4);atomic_store(&controls.state->channelOver[0],true);atomic_store(&controls.state->mainPreLimiterHold,4);
