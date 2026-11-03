@@ -1136,7 +1136,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 }
 - (NSString*)syncSourceSignature {
     NSMutableSet *ids=[NSMutableSet set];for(NSArray *group in [self currentGroups])[ids addObjectsFromArray:group];NSMutableArray *timing=[NSMutableArray array];
-    for(NSDictionary *process in _halSnapshot[@"processes"]){BOOL assigned=NO;for(NSNumber *pid in process[@"ids"])if([ids containsObject:pid]){assigned=YES;break;}if(assigned&&process[@"sourceSinkSignature"])[timing addObject:process[@"sourceSinkSignature"]];}
+    for(NSDictionary *process in _halSnapshot[@"processes"]){if([process[@"isSystemSound"] boolValue]||[process[@"key"] isEqual:@"local.tx6mac.system-sounds"])continue;BOOL assigned=NO;for(NSNumber *pid in process[@"ids"])if([ids containsObject:pid]){assigned=YES;break;}if(assigned&&process[@"sourceSinkSignature"])[timing addObject:process[@"sourceSinkSignature"]];}
     return timing.description;
 }
 - (NSString*)currentSignature {
@@ -1429,6 +1429,12 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     app->_desiredRunning=NO;[app stopAudio];if(!until(^BOOL{return !app->_halBusy;}))return NO;
     menus->_syncCompensation=NO;menus->_processes=@[@{@"key":@"local.tx6mac.system-sounds",@"ids":@[@1]}];menus->_halSnapshot=@{@"processes":@[@{@"ids":@[@1],@"sourceSinkSignature":@"before"}]};NSString *syncOff=[menus currentSignature];
     menus->_halSnapshot=@{@"processes":@[@{@"ids":@[@1],@"sourceSinkSignature":@"after"}]};BOOL syncOffOK=[syncOff isEqual:[menus currentSignature]];
+    menus->_syncCompensation=YES;menus->_assignments[1]=@"native.video";
+    NSDictionary *alert=@{@"key":@"local.tx6mac.system-sounds",@"isSystemSound":@YES,@"ids":@[@1],@"sourceSinkSignature":@"1:inactive"},*video=@{@"key":@"native.video",@"ids":@[@2],@"sourceSinkSignature":@"2:airplay"};
+    menus->_processes=@[alert,video];menus->_halSnapshot=@{@"processes":menus->_processes};NSString *quietAlert=[menus currentSignature];
+    NSMutableDictionary *playingAlert=[alert mutableCopy];playingAlert[@"sourceSinkSignature"]=@"1:studio";menus->_halSnapshot=@{@"processes":@[playingAlert,video]};BOOL alertSyncOK=[quietAlert isEqual:[menus currentSignature]];
+    NSMutableDictionary *movedVideo=[video mutableCopy];movedVideo[@"sourceSinkSignature"]=@"2:studio";menus->_halSnapshot=@{@"processes":@[playingAlert,movedVideo]};alertSyncOK=alertSyncOK&&![quietAlert isEqual:[menus currentSignature]];
+    if(!alertSyncOK)fprintf(stderr,"System alert must not rebuild monitor; native video route must still update\n");
     NSString *previousAirPlay=@"56c65aef-a45a-4582-a41d-d1852bc2413f-118518054570625-Audio",*currentAirPlay=@"56c65aef-a45a-4582-a41d-d1852bc2413f-233729055123583-Audio";
     NSDictionary *airPlay=@{@"id":@301,@"uid":currentAirPlay,@"name":@"AirPlay",@"channels":@2,@"transport":@(kAudioDeviceTransportTypeAirPlay)};
     menus->_outputUID=previousAirPlay;menus->_monitorUID=previousAirPlay;menus->_sceneOutputPinned=YES;menus->_followDefaultOutput=NO;
@@ -1437,7 +1443,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     NSDictionary *beforeAirPlay=@{@"outputUID":previousAirPlay,@"monitorUID":previousAirPlay},*afterAirPlay=@{@"outputUID":currentAirPlay,@"monitorUID":currentAirPlay};
     airPlayOK=airPlayOK&&[TXOutputSemanticSnapshot(beforeAirPlay) isEqual:TXOutputSemanticSnapshot(afterAirPlay)]&&[TXOutputSemanticSnapshot(TXSceneConfiguration(beforeAirPlay)) isEqual:TXOutputSemanticSnapshot(TXSceneConfiguration(afterAirPlay))]&&[TXSceneConfiguration(beforeAirPlay)[@"monitorUID"] isEqual:previousAirPlay];
     if(!airPlayOK)fprintf(stderr,"AirPlay session reconnection regression: FAIL\n");
-    return duplicateMenusOK&&scopeMenusOK&&monitorIdentityOK&&meterIdentityOK&&retryIdentityOK&&mainRetryIdentityOK&&mainIdentityOK&&airPlayOK&&syncOffOK;
+    return duplicateMenusOK&&scopeMenusOK&&monitorIdentityOK&&meterIdentityOK&&retryIdentityOK&&mainRetryIdentityOK&&mainIdentityOK&&airPlayOK&&syncOffOK&&alertSyncOK;
 }
 - (void)stopAudio {
     if(_halStopping)return;

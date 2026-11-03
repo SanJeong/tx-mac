@@ -820,7 +820,9 @@ static NSDictionary *SyncRejectPlan(NSDictionary *plan,NSString *reason) {
         CATapDescription *description=descriptions[@(slot)];NSMutableOrderedSet *sources=[NSMutableOrderedSet orderedSetWithArray:slot<6?groups[slot]:@[]];
         if(slot<6&&description.bundleIDs.count)for(NSNumber *process in allProcesses)if([description.bundleIDs containsObject:ReadString(process.unsignedIntValue,kAudioProcessPropertyBundleID)])[sources addObject:process];
         NSDictionary *source=slot<6&&description?SyncGroupSource(sources.array,cache):@{@"supported":@NO,@"uid":@"",@"reason":slot==6?@"global-remainder":@"no-tap",@"seconds":@0};
-        NSDictionary *mainPlan=SyncDelayPlan(source,mainTiming,rate,_syncCompensationEnabled),*monitorPlan=monitor?SyncDelayPlan(source,monitorTiming,rate,_syncCompensationEnabled):SyncRejectPlan(SyncDelayPlan(source,@{},rate,NO),@"monitor-disabled");
+        // System alerts have no video clock and must not acquire A/V sync delay.
+        BOOL compensate=_syncCompensationEnabled&&slot!=0;
+        NSDictionary *mainPlan=SyncDelayPlan(source,mainTiming,rate,compensate),*monitorPlan=monitor?SyncDelayPlan(source,monitorTiming,rate,compensate):SyncRejectPlan(SyncDelayPlan(source,@{},rate,NO),@"monitor-disabled");
         NSString *allocationReason=AllocateSyncBuffer(&_state->syncDelay[slot],[mainPlan[@"frames"] unsignedIntValue],[monitorPlan[@"frames"] unsignedIntValue],&allocated);
         if(allocationReason){mainPlan=SyncRejectPlan(mainPlan,allocationReason);monitorPlan=SyncRejectPlan(monitorPlan,allocationReason);}
         [rows addObject:@{@"slot":@(slot),@"sourceUID":source[@"uid"]?:@"",@"source":source,@"mainTargetUID":mainTiming[@"uid"]?:@"",@"monitorTargetUID":monitorTiming[@"uid"]?:@"",@"mainDelayMs":mainPlan[@"delayMs"],@"monitorDelayMs":monitorPlan[@"delayMs"],@"main":mainPlan,@"monitor":monitorPlan}];
