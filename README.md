@@ -2,7 +2,7 @@
 
 Control macOS app volume, EQ, and main/monitor routing with a teenage engineering TX-6 over USB or Bluetooth MIDI.
 
-![tx-mac](assets/mixer.png)
+![tx-mac](assets/mixer-en.jpg)
 
 [Download for macOS](https://github.com/SanJeong/tx-mac/releases/latest). Requires macOS 26 or later and Apple Silicon.
 
