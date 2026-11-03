@@ -285,6 +285,16 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     for(int t=0;t<s->tapCount;t++)for(int c=0;c<2;c++){
         UInt32 n=0;if(!ChannelPointer(input,s->physicalInputChannels+t*2+c,&in[t][c],&stride[t][c],&n)){return LevelLayoutFault(s,3);}frames=MIN(frames,n);
     }
+    uint64_t sourceCommand=atomic_load_explicit(&s->sourceUpdateCommand,memory_order_acquire);
+    UInt32 updating=(UInt32)sourceCommand;
+    for(int slot=0;slot<TX_SLOTS;slot++){
+        uint64_t command=atomic_load_explicit(&s->syncCommand[slot],memory_order_acquire);
+        if(command==s->syncAppliedCommand[slot])continue;
+        s->syncAppliedCommand[slot]=command;s->syncDelay[slot].mainFrames=command&0xFFFFF;s->syncDelay[slot].monitorFrames=(command>>20)&0xFFFFF;
+        s->syncDelay[slot].validFrames=0;s->syncDelay[slot].writeIndex=0;
+        for(int b=0;b<TX_EQ;b++){s->filters[slot][b].z1[0]=s->filters[slot][b].z1[1]=s->filters[slot][b].z2[0]=s->filters[slot][b].z2[1]=0;s->syncMonitorFilters[slot][b].z1[0]=s->syncMonitorFilters[slot][b].z1[1]=s->syncMonitorFilters[slot][b].z2[0]=s->syncMonitorFilters[slot][b].z2[1]=0;}
+    }
+    atomic_store_explicit(&s->sourceUpdateApplied,sourceCommand,memory_order_release);
     // Validate live IO while suppressing every output during a protected transition.
     if(atomic_load(&s->transitionMuted)){
         ClearLevelCurrent(s);InvalidateSyncHistory(s);
@@ -294,7 +304,7 @@ static OSStatus Render(AudioObjectID device,const AudioTimeStamp *now,const Audi
     UInt32 routes[TX_SLOTS];BOOL muted[TX_SLOTS];double usbEnergy[6]={0};float busPeaks[2]={0};
     BOOL reference=atomic_load(&s->meterReference);
     for(int t=0;t<s->tapCount;t++){
-        int slot=s->tapSlots[t];float rawGain=atomic_load(&s->gain[slot]);muted[slot]=atomic_load(&s->muted[slot]);target[t]=muted[slot]||!isfinite(rawGain)?0:fmaxf(0,fminf(1,rawGain));
+        int slot=s->tapSlots[t];float rawGain=atomic_load(&s->gain[slot]);muted[slot]=atomic_load(&s->muted[slot])||((updating>>slot)&1);target[t]=muted[slot]||!isfinite(rawGain)?0:fmaxf(0,fminf(1,rawGain));
         for(int b=0;b<TX_EQ;b++){
             double requested=atomic_load(&s->eq[slot][b]);requested=isfinite(requested)?fmax(-18,fmin(18,requested)):0;double delta=requested-s->currentEQ[slot][b];
             if(fabs(delta)>0.00001){s->currentEQ[slot][b]+=fmax(-0.25,fmin(0.25,delta));SetFilter(&s->filters[slot][b],b,s->currentEQ[slot][b],s->sampleRate);SetFilter(&s->syncMonitorFilters[slot][b],b,s->currentEQ[slot][b],s->sampleRate);}
@@ -670,7 +680,7 @@ static NSArray<NSDictionary*> *PlanProcessTaps(NSArray *groups,NSArray *metadata
     NSMutableArray *plan=[NSMutableArray array];
     for(int slot=0;slot<TX_SLOTS;slot++){
         NSArray *ids=slot<6?groups[slot]:excluded,*bundles=slot<6?slotBundles[slot]:excludedBundles.array;
-        if(slot<6&&!ids.count&&(!metadata||!bundles.count))continue;
+        if(slot<6&&!metadata&&!ids.count)continue;
         CATapDescription *description=slot==6?[[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:ids]:[[CATapDescription alloc] initStereoMixdownOfProcesses:ids];
         description.name=[NSString stringWithFormat:TXL(@"TX6Mac 채널 %d"),slot+1];description.privateTap=YES;description.muteBehavior=CATapMutedWhenTapped;
         if(@available(macOS 26.0,*)){description.bundleIDs=bundles;description.processRestoreEnabled=YES;}
@@ -690,6 +700,26 @@ static NSArray<NSDictionary*> *CreateProcessTapSet(NSArray<NSDictionary*> *plan,
     return created;
 }
 static void DestroyProcessTapSet(NSMutableArray<NSNumber*> *owned,TXGuardDestroy destroy) {for(NSNumber *tap in owned)destroy(tap.unsignedIntValue);[owned removeAllObjects];}
+
+static BOOL SameTapSources(CATapDescription *a,CATapDescription *b) {
+    return [[NSSet setWithArray:a.processes] isEqual:[NSSet setWithArray:b.processes]]&&[[NSSet setWithArray:a.bundleIDs] isEqual:[NSSet setWithArray:b.bundleIDs]];
+}
+typedef OSStatus (^TXTapWriter)(NSUInteger,CATapDescription*);
+static NSError *LiveTapError(NSString *detail,OSStatus status) {return [NSError errorWithDomain:NSOSStatusErrorDomain code:status userInfo:@{NSLocalizedDescriptionKey:TXL(@"채널 연결 갱신 실패 · 기존 재생은 유지합니다."),NSDebugDescriptionErrorKey:detail}];}
+static BOOL RetargetTapSet(NSArray *current,NSArray *desired,TXTapWriter write,BOOL *restored) {
+    *restored=YES;CATapDescription *oldGlobal=current[6][@"description"],*nextGlobal=desired[6][@"description"];
+    NSMutableOrderedSet *ids=[NSMutableOrderedSet orderedSetWithArray:oldGlobal.processes],*bundles=[NSMutableOrderedSet orderedSetWithArray:oldGlobal.bundleIDs];[ids addObjectsFromArray:nextGlobal.processes];[bundles addObjectsFromArray:nextGlobal.bundleIDs];
+    CATapDescription *excluded=[[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:ids.array];excluded.bundleIDs=bundles.array;excluded.privateTap=YES;excluded.processRestoreEnabled=YES;excluded.muteBehavior=CATapMutedWhenTapped;excluded.UUID=oldGlobal.UUID;excluded.name=oldGlobal.name;
+    UInt32 changed=0;for(int slot=0;slot<6;slot++)if(!SameTapSources(current[slot][@"description"],desired[slot][@"description"]))changed|=1U<<slot;
+    if(!changed&&SameTapSources(oldGlobal,nextGlobal))return YES;
+    BOOL ok=write(6,excluded)==noErr;
+    for(int slot=0;ok&&slot<6;slot++)if((changed>>slot)&1)ok=write(slot,desired[slot][@"description"])==noErr;
+    if(ok)ok=write(6,nextGlobal)==noErr;
+    if(ok)return YES;
+    for(int slot=0;slot<6;slot++)if((changed>>slot)&1)if(write(slot,current[slot][@"description"])!=noErr)*restored=NO;
+    if(write(6,*restored?oldGlobal:excluded)!=noErr)*restored=NO;
+    return NO;
+}
 
 static const double SyncMaxSeconds=2;
 static const size_t SyncMaxBytes=16*1024*1024;
@@ -798,6 +828,10 @@ static NSDictionary *SyncRejectPlan(NSDictionary *plan,NSString *reason) {
     AudioObjectID _globalTap;
     BOOL _running;
     NSDictionary *_syncPlan;
+    NSArray *_liveTaps;
+    uint64_t _sourceRevision,_syncRevision;
+    UInt32 _resetSourceSlots;
+    BOOL _liveSourcesCoherent;
 }
 - (instancetype)init {if((self=[super init])){_state=calloc(1,sizeof(*_state));_taps=[NSMutableArray array];_syncCompensationEnabled=YES;atomic_store(&_state->master,1);atomic_store(&_state->monitorGain,1);for(int i=0;i<TX_SLOTS;i++)atomic_store(&_state->gain[i],1);}return self;}
 - (TXRenderState*)state{return _state;}
@@ -807,15 +841,40 @@ static NSDictionary *SyncRejectPlan(NSDictionary *plan,NSString *reason) {
 - (AudioDeviceID)device{return _device;}
 - (BOOL)metering{return _running&&_state->meterEnabled;}
 - (BOOL)monitoring{return _running&&_state->monitorEnabled;}
+- (BOOL)liveUpdatesAvailable{return _running&&_liveSourcesCoherent&&_liveTaps.count==TX_SLOTS;}
 - (NSDictionary*)syncDiagnostics {
     NSMutableDictionary *result=[(_syncPlan?:@{@"enabled":@(_syncCompensationEnabled),@"slots":@[]}) mutableCopy];result[@"running"]=@(_running);result[@"requestedEnabled"]=@(_syncCompensationEnabled);
     result[@"timestamp"]=@{@"nowFlags":@(atomic_load(&_state->syncNowFlags)),@"inputFlags":@(atomic_load(&_state->syncInputFlags)),@"outputFlags":@(atomic_load(&_state->syncOutputFlags)),@"nowHostTime":@(atomic_load(&_state->syncNowHostTime)),@"inputHostTime":@(atomic_load(&_state->syncInputHostTime)),@"outputHostTime":@(atomic_load(&_state->syncOutputHostTime)),@"inputToOutputMs":@(atomic_load(&_state->syncInputToOutputMS)),@"nowToOutputMs":@(atomic_load(&_state->syncNowToOutputMS))};return [result copy];
+}
+- (BOOL)updateGroups:(NSArray*)groups bundleIDs:(NSArray*)bundles error:(NSError**)error {
+    NSAssert(!NSThread.isMainThread,@"Tap updates belong on the HAL worker");if(error)*error=nil;
+    if(!self.liveUpdatesAvailable||!bundles){if(error)*error=LiveTapError(@"Live channel update unavailable",-30);return NO;}
+    NSMutableArray *owners=[NSMutableArray array];NSMutableSet *unique=[NSMutableSet set];
+    for(NSNumber *n in ReadIDs(kAudioObjectSystemObject,kAudioHardwarePropertyProcessObjectList,kAudioObjectPropertyScopeGlobal))if((pid_t)ReadUInt(n.unsignedIntValue,kAudioProcessPropertyPID)==getpid())[owners addObject:n];
+    for(NSArray *row in groups)for(NSNumber *n in row){if(![n isKindOfClass:NSNumber.class]||!n.unsignedIntValue||[unique containsObject:n]||[owners containsObject:n]){if(error)*error=LiveTapError(@"Invalid live channel sources",-31);return NO;}[unique addObject:n];}
+    NSArray *plan=PlanProcessTaps(groups,bundles,owners,NSBundle.mainBundle.bundleIdentifier,^NSString*(AudioObjectID n){return ReadString(n,kAudioProcessPropertyBundleID);},error);if(plan.count!=TX_SLOTS)return NO;
+    UInt32 mask=0;for(int slot=0;slot<TX_SLOTS;slot++){CATapDescription *next=plan[slot][@"description"],*previous=_liveTaps[slot][@"description"];next.UUID=previous.UUID;if(slot<6&&!SameTapSources(previous,next))mask|=1U<<slot;}
+    uint64_t command=(++_sourceRevision<<32)|mask;atomic_store_explicit(&_state->sourceUpdateCommand,command,memory_order_release);
+    NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:.5];while(atomic_load_explicit(&_state->sourceUpdateApplied,memory_order_acquire)!=command&&deadline.timeIntervalSinceNow>0)[NSThread sleepForTimeInterval:.002];
+    if(atomic_load(&_state->sourceUpdateApplied)!=command){atomic_store(&_state->sourceUpdateCommand,++_sourceRevision<<32);if(error)*error=LiveTapError(@"Channel update acknowledgement timed out",-32);return NO;}
+    BOOL restored=NO;__block OSStatus failure=noErr;
+    BOOL ok=RetargetTapSet(_liveTaps,plan,^OSStatus(NSUInteger slot,CATapDescription *description){
+        AudioObjectID tap=[self->_liveTaps[slot][@"tap"] unsignedIntValue];AudioObjectPropertyAddress a=Addr(kAudioTapPropertyDescription,kAudioObjectPropertyScopeGlobal);OSStatus status=AudioObjectSetPropertyData(tap,&a,0,NULL,sizeof(description),&description);
+        if(status==noErr){AudioStreamBasicDescription format={0};UInt32 size=sizeof(format);a=Addr(kAudioTapPropertyFormat,kAudioObjectPropertyScopeGlobal);status=AudioObjectGetPropertyData(tap,&a,0,NULL,&size,&format);if(status==noErr&&(format.mChannelsPerFrame!=2||format.mFormatID!=kAudioFormatLinearPCM||!(format.mFormatFlags&kAudioFormatFlagIsFloat)||format.mBitsPerChannel!=32))status=kAudioHardwareUnsupportedOperationError;}
+        if(status!=noErr)failure=status;return status;
+    },&restored);
+    if(ok){NSMutableArray *updated=[NSMutableArray array];for(int slot=0;slot<TX_SLOTS;slot++){NSMutableDictionary *entry=[_liveTaps[slot] mutableCopy];entry[@"description"]=plan[slot][@"description"];[updated addObject:entry];}_liveTaps=updated;_globalDescription=_liveTaps[6][@"description"];self.slotBundleIDs=bundles;_resetSourceSlots=mask;[self configureSyncGroups:groups taps:_liveTaps main:_device monitor:self.monitorOutputDevice rate:_state->sampleRate];_resetSourceSlots=0;}
+    if(!ok&&restored)for(int slot=0;slot<6;slot++)if((mask>>slot)&1){NSDictionary *row=_syncPlan[@"slots"][slot];uint64_t reset=((++_syncRevision&0xFFFFFF)<<40)|((uint64_t)[row[@"monitor"][@"frames"] unsignedIntValue]<<20)|[row[@"main"][@"frames"] unsignedIntValue];atomic_store_explicit(&_state->syncCommand[slot],reset,memory_order_release);}
+    if(ok||restored)atomic_store_explicit(&_state->sourceUpdateCommand,++_sourceRevision<<32,memory_order_release);
+    else {_liveSourcesCoherent=NO;atomic_store_explicit(&_state->sourceUpdateCommand,(++_sourceRevision<<32)|mask|(1U<<6),memory_order_release);}
+    if(!ok&&error)*error=LiveTapError(restored?@"Channel update failed; previous playback retained":@"Channel update failed; affected channels held silent",failure?:-33);
+    return ok;
 }
 - (void)configureSyncGroups:(NSArray*)groups taps:(NSArray*)created main:(AudioDeviceID)main monitor:(AudioDeviceID)monitor rate:(double)rate {
     NSMutableDictionary *cache=[NSMutableDictionary dictionary];NSDictionary *mainTiming=SyncCachedTiming(main,cache),*monitorTiming=monitor?SyncCachedTiming(monitor,cache):@{};
     NSMutableArray *rows=[NSMutableArray array];NSMutableDictionary *descriptions=[NSMutableDictionary dictionary];for(NSDictionary *entry in created)descriptions[entry[@"slot"]]=entry[@"description"];
     NSArray *allProcesses=ReadIDs(kAudioObjectSystemObject,kAudioHardwarePropertyProcessObjectList,kAudioObjectPropertyScopeGlobal);size_t allocated=0;
-    mach_timebase_info_data_t timebase={0};if(mach_timebase_info(&timebase)==KERN_SUCCESS&&timebase.denom)_state->syncHostTickMS=(double)timebase.numer/timebase.denom/1000000;
+    mach_timebase_info_data_t timebase={0};if(!_running&&mach_timebase_info(&timebase)==KERN_SUCCESS&&timebase.denom)_state->syncHostTickMS=(double)timebase.numer/timebase.denom/1000000;
     for(int slot=0;slot<TX_SLOTS;slot++){
         CATapDescription *description=descriptions[@(slot)];NSMutableOrderedSet *sources=[NSMutableOrderedSet orderedSetWithArray:slot<6?groups[slot]:@[]];
         if(slot<6&&description.bundleIDs.count)for(NSNumber *process in allProcesses)if([description.bundleIDs containsObject:ReadString(process.unsignedIntValue,kAudioProcessPropertyBundleID)])[sources addObject:process];
@@ -823,8 +882,24 @@ static NSDictionary *SyncRejectPlan(NSDictionary *plan,NSString *reason) {
         // System alerts have no video clock and must not acquire A/V sync delay.
         BOOL compensate=_syncCompensationEnabled&&slot!=0;
         NSDictionary *mainPlan=SyncDelayPlan(source,mainTiming,rate,compensate),*monitorPlan=monitor?SyncDelayPlan(source,monitorTiming,rate,compensate):SyncRejectPlan(SyncDelayPlan(source,@{},rate,NO),@"monitor-disabled");
-        NSString *allocationReason=AllocateSyncBuffer(&_state->syncDelay[slot],[mainPlan[@"frames"] unsignedIntValue],[monitorPlan[@"frames"] unsignedIntValue],&allocated);
+        UInt32 mainFrames=[mainPlan[@"frames"] unsignedIntValue],monitorFrames=[monitorPlan[@"frames"] unsignedIntValue];
+        TXSyncDelay *delay=&_state->syncDelay[slot];NSString *allocationReason=nil;
+        if(!_running){
+            UInt32 reserve=slot>0&&slot<6?MIN((UInt32)(rate*SyncMaxSeconds),(UInt32)(SyncMaxBytes/(5*2*sizeof(float)))-1):0;
+            allocationReason=AllocateSyncBuffer(delay,reserve,reserve,&allocated);
+            atomic_store(&_state->syncCommand[slot],0);_state->syncAppliedCommand[slot]=0;
+        }else allocated+=(size_t)delay->capacity*2*sizeof(float);
+        if(MAX(mainFrames,monitorFrames)&&MAX(mainFrames,monitorFrames)>=delay->capacity)allocationReason=@"memory-limit";
         if(allocationReason){mainPlan=SyncRejectPlan(mainPlan,allocationReason);monitorPlan=SyncRejectPlan(monitorPlan,allocationReason);}
+        if(!_running){delay->mainFrames=[mainPlan[@"frames"] unsignedIntValue];delay->monitorFrames=[monitorPlan[@"frames"] unsignedIntValue];}
+        else {
+            NSDictionary *previous=(NSUInteger)slot<[_syncPlan[@"slots"] count]?_syncPlan[@"slots"][slot]:@{};
+            BOOL changed=slot>0&&slot<6&&(![(previous[@"source"][@"signature"]?:@"") isEqual:(source[@"signature"]?:@"")]||[previous[@"main"][@"frames"] unsignedIntValue]!=[mainPlan[@"frames"] unsignedIntValue]||[previous[@"monitor"][@"frames"] unsignedIntValue]!=[monitorPlan[@"frames"] unsignedIntValue]);
+            if(changed||((_resetSourceSlots>>slot)&1)){
+                uint64_t command=((++_syncRevision&0xFFFFFF)<<40)|((uint64_t)[monitorPlan[@"frames"] unsignedIntValue]<<20)|[mainPlan[@"frames"] unsignedIntValue];
+                atomic_store_explicit(&_state->syncCommand[slot],command,memory_order_release);
+            }
+        }
         [rows addObject:@{@"slot":@(slot),@"sourceUID":source[@"uid"]?:@"",@"source":source,@"mainTargetUID":mainTiming[@"uid"]?:@"",@"monitorTargetUID":monitorTiming[@"uid"]?:@"",@"mainDelayMs":mainPlan[@"delayMs"],@"monitorDelayMs":monitorPlan[@"delayMs"],@"main":mainPlan,@"monitor":monitorPlan}];
     }
     _syncPlan=@{@"enabled":@(_syncCompensationEnabled),@"model":@"device-stream-estimate",@"timestampCompensation":@"not-inferred",@"mainTarget":mainTiming,@"monitorTarget":monitorTiming,@"slots":[rows copy],@"memoryBytes":@(allocated),@"maxDelayMs":@(SyncMaxSeconds*1000)};
@@ -903,6 +978,7 @@ static NSDictionary *SyncRejectPlan(NSDictionary *plan,NSString *reason) {
         UInt32 bytes=sizeof(*format);AudioObjectPropertyAddress address=Addr(kAudioTapPropertyFormat,kAudioObjectPropertyScopeGlobal);return AudioObjectGetPropertyData(tap,&address,0,NULL,&bytes,format);
     },&tapError);
     if(!created)return [self fail:tapError.localizedDescription status:(OSStatus)tapError.code];
+    _liveTaps=created;_liveSourcesCoherent=YES;atomic_store(&_state->sourceUpdateCommand,0);atomic_store(&_state->sourceUpdateApplied,0);
     NSMutableArray *tapList=[NSMutableArray array];
     for(NSDictionary *entry in created){int slot=[entry[@"slot"] intValue];_state->tapSlots[_state->tapCount++]=slot;[tapList addObject:entry[@"subtap"]];if(slot==6){_globalDescription=entry[@"description"];_globalTap=[entry[@"tap"] unsignedIntValue];}}
     NSMutableArray *subdevices=[NSMutableArray arrayWithObject:@{@kAudioSubDeviceUIDKey:uid}];
@@ -972,7 +1048,7 @@ static NSDictionary *SyncRejectPlan(NSDictionary *plan,NSString *reason) {
     NSAssert(!NSThread.isMainThread||(!_aggregate&&!_taps.count),@"HAL shutdown must not block the main thread");
     if(_aggregate&&_proc){AudioDeviceStop(_aggregate,_proc);AudioDeviceDestroyIOProcID(_aggregate,_proc);}_proc=NULL;
     if(_aggregate)AudioHardwareDestroyAggregateDevice(_aggregate);_aggregate=0;
-    DestroyProcessTapSet(_taps,^OSStatus(AudioObjectID tap){return AudioHardwareDestroyProcessTap(tap);});_globalDescription=nil;_globalTap=0;_running=NO;
+    DestroyProcessTapSet(_taps,^OSStatus(AudioObjectID tap){return AudioHardwareDestroyProcessTap(tap);});_liveTaps=nil;_globalDescription=nil;_globalTap=0;_running=NO;
     _state->meterEnabled=NO;_state->meterOutputOffset=0;_state->monitorEnabled=NO;_state->monitorLeft=0;_state->monitorRight=0;
     _state->tapCount=0;_state->physicalInputChannels=0;
     _state->meterReferenceFrame=0;
@@ -1176,8 +1252,8 @@ static BOOL TapRoutingSelfCheck(void) {
     if(![live.processes isEqual:@[@101]]||![live.bundleIDs isEqual:@[@"org.live.app"]]||live.exclusive||![remainder.processes isEqual:@[@999,@101]]||![remainder.bundleIDs isEqual:@[@"local.tx6mac.mixer",@"org.live.app"]]||!remainder.exclusive)return NO;
     NSArray *metadata=@[@[@"org.live.app"],@[],@[@"org.closed.app",@"org.closed.helper"],@[],@[],@[]];
     NSArray *plan=PlanProcessTaps(groups,metadata,@[@999],@"local.tx6mac.mixer",reader,&error);
-    if(!plan||error||plan.count!=3||[plan[1][@"slot"] intValue]!=2)return NO;
-    CATapDescription *closed=plan[1][@"description"];remainder=plan[2][@"description"];
+    if(!plan||error||plan.count!=7||[plan[2][@"slot"] intValue]!=2)return NO;
+    CATapDescription *closed=plan[2][@"description"];remainder=plan[6][@"description"];
     if(closed.processes.count||closed.exclusive||!closed.privateTap||!closed.processRestoreEnabled||closed.muteBehavior!=CATapMutedWhenTapped||![closed.bundleIDs isEqual:metadata[2]]||![remainder.processes isEqual:@[@999,@101]])return NO;
     for(NSString *bundle in @[@"org.live.app",@"org.closed.app",@"org.closed.helper",@"local.tx6mac.mixer"])if(![remainder.bundleIDs containsObject:bundle])return NO;
     if(PlanProcessTaps(groups,@[],@[@999],@"local.tx6mac.mixer",reader,&error)||!error)return NO;
@@ -1199,11 +1275,20 @@ static BOOL TapRoutingSelfCheck(void) {
         NSArray *created=CreateProcessTapSet(plan,owned,^OSStatus(CATapDescription *description,AudioObjectID *tap){creates++;*tap=100+creates;return failure==1&&creates==2?-801:noErr;},^OSStatus(AudioObjectID tap,AudioStreamBasicDescription *format){
             formats++;*format=(AudioStreamBasicDescription){.mChannelsPerFrame=2,.mFormatID=kAudioFormatLinearPCM,.mFormatFlags=kAudioFormatFlagIsFloat,.mBitsPerChannel=32};return failure==2&&formats==2?-802:noErr;
         },&error);
-        if(failure==0){if(!created||error||created.count!=3||owned.count!=3||[created[1][@"slot"] intValue]!=2)return NO;}
+        if(failure==0){if(!created||error||created.count!=7||owned.count!=7||[created[2][@"slot"] intValue]!=2)return NO;}
         else if(created||!error||error.code!=(failure==1?-801:-802)||owned.count!=(failure==1?1:2))return NO;
         NSArray *before=[owned copy];DestroyProcessTapSet(owned,^OSStatus(AudioObjectID tap){[destroyed addObject:@(tap)];return noErr;});
         if(owned.count||![destroyed isEqual:before])return NO;
     }
+    NSMutableArray *nextGroups=[groups mutableCopy],*nextMetadata=[metadata mutableCopy];nextGroups[1]=@[@202];nextMetadata[1]=@[@"org.new.app"];
+    NSArray *next=PlanProcessTaps(nextGroups,nextMetadata,@[@999],@"local.tx6mac.mixer",reader,&error);if(next.count!=TX_SLOTS)return NO;
+    for(int failAt=0;failAt<=3;failAt++){
+        NSMutableArray *actual=[NSMutableArray array];for(NSDictionary *entry in plan)[actual addObject:entry[@"description"]];__block int writes=0;__block BOOL unrelatedTouched=NO;BOOL restored=NO;
+        BOOL ok=RetargetTapSet(plan,next,^OSStatus(NSUInteger slot,CATapDescription *description){writes++;if(slot!=1&&slot!=6)unrelatedTouched=YES;if(writes==failAt)return -901;actual[slot]=description;return noErr;},&restored);
+        if(unrelatedTouched||ok!=(failAt==0)||!restored)return NO;
+        for(int slot=0;slot<TX_SLOTS;slot++)if(!SameTapSources(actual[slot],(failAt?plan:next)[slot][@"description"]))return NO;
+    }
+    BOOL restored=YES;if(RetargetTapSet(plan,next,^OSStatus(NSUInteger slot,CATapDescription *description){return -902;},&restored)||restored)return NO;
     return YES;
 }
 
@@ -1449,6 +1534,11 @@ BOOL TXRunSelfCheck(void) {
     delayedInput.buf[0].mData=NULL;Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
     SYNC_EXPECT(atomic_load(&delayed.layoutFault)==3&&delayed.syncDelay[0].validFrames==0);
     delayedInput.buf[0].mData=delayedSource;
+    memcpy(&delayed,&routed,sizeof(delayed));atomic_store(&delayed.route[0],TXOutputBoth);
+    uint64_t liveCommand=(1ULL<<40)|2;delayed.syncDelay[1]=(TXSyncDelay){.samples=delayedRing,.capacity=4,.validFrames=3};
+    atomic_store(&delayed.syncCommand[1],liveCommand);atomic_store(&delayed.sourceUpdateCommand,(1ULL<<32)|(1U<<1));
+    Render(0,NULL,(AudioBufferList*)&delayedInput,NULL,(AudioBufferList*)&ro,NULL,&delayed);
+    SYNC_EXPECT(delayed.syncAppliedCommand[1]==liveCommand&&delayed.syncDelay[1].mainFrames==2&&delayed.syncDelay[1].validFrames==0&&delayed.syncAppliedCommand[0]==0&&fabsf(buses[0]-.1f)<1e-6&&atomic_load(&delayed.sourceUpdateApplied)==((1ULL<<32)|(1U<<1)));
 #undef SYNC_EXPECT
 #define LEVEL_EXPECT(condition) do{if(!(condition)){fprintf(stderr,"Level telemetry self-check failed at line %d\n",__LINE__);return NO;}}while(0)
     TXRenderState levels;memcpy(&levels,&routed,sizeof(levels));atomic_store(&levels.route[0],TXOutputBoth);

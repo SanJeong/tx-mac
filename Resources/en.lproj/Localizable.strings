@@ -260,3 +260,5 @@
 "기기 숫자 맞춤" = "Match device volume";
 "맞춤" = "Match";
 "한 번만 적용 · 자동 동기화 아님" = "One-time adjustment · no automatic sync";
+
+"채널 연결 갱신 실패 · 기존 재생은 유지합니다." = "Channel update failed · existing playback is retained.";

@@ -583,9 +583,13 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 @property(atomic) NSUInteger failNextStarts,failStartNumber;
 @property(atomic,copy) NSArray *lastGroups;
 @property(nonatomic,strong) NSMutableArray *plans;
+@property(nonatomic) BOOL simulateLive,failLive;
+@property(nonatomic) NSUInteger liveUpdates;
 @end
 @implementation TXSceneCheckAudio
 - (instancetype)init {if((self=[super init])){_events=[NSMutableArray array];_plans=[NSMutableArray array];}return self;}
+- (BOOL)liveUpdatesAvailable{return _simulateLive;}
+- (BOOL)updateGroups:(NSArray*)groups bundleIDs:(NSArray*)bundles error:(NSError**)error {self.usedMain|=NSThread.isMainThread;self.liveUpdates++;if(_failLive){if(error)*error=[NSError errorWithDomain:@"fixture" code:-1 userInfo:nil];return NO;}self.lastGroups=groups;self.slotBundleIDs=bundles;return YES;}
 - (BOOL)startOnDevice:(AudioDeviceID)device groups:(NSArray*)groups {
     self.usedMain=self.usedMain||NSThread.isMainThread;self.starts++;self.lastGroups=groups;[_plans addObject:@{@"device":@(device),@"monitor":@(self.monitorOutputDevice),@"meter":@(self.meterOutputDevice),@"groups":groups,@"bundles":self.slotBundleIDs?:@[@[],@[],@[],@[],@[],@[]],@"gain":@(atomic_load(&self.state->gain[1])),@"eq":@(atomic_load(&self.state->eq[1][0])),@"mute":@(atomic_load(&self.state->muted[1]))}];[_events addObject:[NSString stringWithFormat:@"start:%u",device]];if(!atomic_load(&self.state->transitionMuted))self.wrongOrder=YES;
     if(self.starts==self.blockStart)dispatch_semaphore_wait(self.firstStartGate,DISPATCH_TIME_FOREVER);
@@ -612,10 +616,12 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 + (BOOL)sceneControllerSelfCheck;
 + (BOOL)appGroupSelfCheck;
 + (BOOL)ordinaryGuardSelfCheck;
++ (BOOL)liveSourceSelfCheck;
 - (void)finishSceneQuit;
 - (void)replyToSceneTermination;
 @end
 @interface TXHALCheckApp:TXApp
+@property(nonatomic) BOOL ignoreHALSnapshots;
 @end
 @interface TXSceneCheckApp:TXApp
 @property(nonatomic,strong) TXSceneCheckDefaults *memoryDefaults;
@@ -635,7 +641,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     TXLevelsController *_levelsController;TXLevelSnapshot _levelSnapshot;
     TXFader *_masterFader;NSArray<TXChannel*> *_channels;NSTextField *_remainderLabel;
     BOOL _syncCompensation;NSButton *_syncButton;NSTextField *_syncLabel;BOOL _browserTabMode,_followDefaultOutput,_usbMeters,_usbMetering;NSButton *_usbMetersButton;NSTextField *_usbMetersStatus;NSString *_usbMeterError,*_monitorError,*_monitorUID,*_monitorName;BOOL _monitoring;NSButton *_browserTabsButton;
-    NSArray<NSDictionary*> *_outputs,*_processes;NSMutableArray<NSString*> *_assignments;NSString *_outputUID,*_signature,*_statusFile,*_lastMIDI;
+    NSArray<NSDictionary*> *_outputs,*_processes;NSMutableArray<NSString*> *_assignments;NSString *_outputUID,*_signature,*_statusFile,*_lastMIDI,*_audioTopologySignature,*_failedSourceSignature;NSUInteger _liveSourceUpdates;BOOL _sourceUpdateBlocked;
     NSTimer *_poll,*_meter;BOOL _desiredRunning,_isBuilding,_pickup,_invert,_autoAssign;NSInteger _overflowCount;NSString *_outputMenuSignature,*_processMenuSignature;NSDate *_startedAt,*_progressAt;uint64_t _progressFrames;BOOL _latched[6][4];double _previous[6][4];BOOL _havePrevious[6][4];
     NSMenuItem *_masterMenuLabel;NSSlider *_menuMaster;NSMutableArray<NSMenuItem*> *_muteItems;NSDate *_lastSave,*_lastLimitDate;uint64_t _lastLimitedFrames;
     dispatch_queue_t _halQueue;BOOL _halBusy,_halSnapshotRequested,_halSnapshotReady,_audioReady,_halWaitReported,_halStopping;
@@ -839,7 +845,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
                     [self drainSceneMIDI];if(self->_sceneMIDIOverflow)atomic_store(&backend.state->transitionMuted,true);BOOL finalReady=!running||(atomic_load(&backend.state->callbacks)>0&&!atomic_load(&backend.state->layoutFault));
                     if(canRelease&&released&&!self->_sceneMIDIOverflow&&finalReady)atomic_store(&backend.state->transitionMuted,false);
                     self->_sceneApplying=NO;self->_isBuilding=NO;self->_sceneBaseline=nil;self->_sceneRollbackRequest=nil;if(!released||lostReady||self->_sceneMIDIOverflow||(ready&&!finalReady)){self->_audioError=[self sceneErrorText:endError];self->_audioReady=NO;}
-                    self->_signature=[self currentSignature];self->_startedAt=NSDate.date;self->_progressAt=NSDate.date;self->_progressFrames=0;self->_canvas.message=self->_audioError;self->_outputMenu.enabled=YES;self->_monitorMenu.enabled=YES;self->_monitorSlider.enabled=YES;self->_autoButton.enabled=YES;self->_usbMetersButton.enabled=YES;
+                    self->_signature=[self currentSignature];if(self->_audioReady){self->_audioTopologySignature=[self currentTopologySignature];self->_sourceUpdateBlocked=NO;self->_failedSourceSignature=nil;}self->_startedAt=NSDate.date;self->_progressAt=NSDate.date;self->_progressFrames=0;self->_canvas.message=self->_audioError;self->_outputMenu.enabled=YES;self->_monitorMenu.enabled=YES;self->_monitorSlider.enabled=YES;self->_autoButton.enabled=YES;self->_usbMetersButton.enabled=YES;
                     [self refreshDeviceMenus];[self saveSettings];[self updateStatus];[self writeStatusNow];[self processHALWork];
                 });
             });
@@ -1153,6 +1159,32 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     if(!_syncCompensation)return [base stringByAppendingString:@"|sync:off"];
     return [base stringByAppendingFormat:@"|sync:on:%@:%@:%@",[self syncSourceSignature],d[@"timingSignature"]?:@"",[self selectedMonitor][@"timingSignature"]?:@""];
 }
+- (NSString*)currentTopologySignature {
+    NSDictionary *main=[self selectedOutput],*monitor=[self selectedMonitor],*meter=[self usbMeterDevice];
+    return [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%@|%@|%@|%d|%d|%d|%@|%@",_outputUID?:@"",main[@"id"]?:@0,main[@"rate"]?:@0,_monitorUID?:@"",monitor[@"id"]?:@0,monitor[@"rate"]?:@0,meter[@"id"]?:@0,meter[@"rate"]?:@0,meter[@"uid"]?:@"",_usbMeters,_syncCompensation,_browserTabMode,main[@"timingSignature"]?:@"",monitor[@"timingSignature"]?:@""];
+}
+- (BOOL)updateLiveSourcesIfPossible {
+    if(_halBusy&&_audioReady)return YES;
+    if(_sourceUpdateBlocked&&_audioReady&&[_audioTopologySignature isEqual:[self currentTopologySignature]]){[self restoreLiveSourceAssignments];return YES;}
+    if(!_audioReady||!_audio.liveUpdatesAvailable||![_audioTopologySignature isEqual:[self currentTopologySignature]])return NO;
+    NSString *signature=[self currentSignature];if([_signature isEqual:signature])return NO;
+    if(_halBusy)return YES;if([_failedSourceSignature isEqual:signature]){[self restoreLiveSourceAssignments];return YES;}
+    NSDictionary *configuration=TXSceneConfiguration([self runtimeSceneSnapshot]),*request=[self sceneAudioRequest:[self runtimeSceneSnapshot]];NSUInteger generation=_halGeneration;
+    _halBusy=YES;_halStartedAt=NSDate.date;TXAudio *backend=_audio;__weak TXApp *weakSelf=self;
+    dispatch_async(_halQueue,^{@autoreleasepool {
+        NSError *error=nil;BOOL ok=[backend updateGroups:request[@"groups"] bundleIDs:request[@"slotBundleIDs"] error:&error];BOOL blocked=!backend.liveUpdatesAvailable;
+        dispatch_async(dispatch_get_main_queue(),^{TXApp *app=weakSelf;if(!app)return;app->_halBusy=NO;app->_halStartedAt=nil;
+            if(generation==app->_halGeneration){
+                if(ok){app->_signature=signature;app->_failedSourceSignature=nil;app->_liveSourceUpdates++;app->_committedAudioRequest=request;app->_committedSceneConfig=configuration;app->_audioError=@"";}
+                else{app->_sourceUpdateBlocked=blocked;app->_failedSourceSignature=signature;[app restoreLiveSourceAssignments];app->_audioError=error.localizedDescription?:TXL(@"프로그램 오디오 탭 생성");app->_canvas.message=app->_audioError;}
+            }
+            [app updateStatus];[app writeStatusNow];[app requestHALSnapshot];
+        });
+    }});return YES;
+}
+- (void)restoreLiveSourceAssignments {
+    if(!_committedSceneConfig)return;NSMutableDictionary *snapshot=[[self runtimeSceneSnapshot] mutableCopy];for(NSString *key in @[@"assignments",@"appGroups",@"pendingSources",@"sceneReservations"])if(_committedSceneConfig[key])snapshot[key]=_committedSceneConfig[key];[self commitSceneModel:snapshot sceneID:_selectedSceneID];[self saveSettings];
+}
 - (void)scheduleRecovery {
     if(!_desiredRunning||_explicitStop||_sleeping||_retryAt)return;if(!TXMayAutoStart(_autoStart,_audioStartConsent,_explicitStop,_sleeping)){_retryExhausted=YES;return;}
     NSTimeInterval delay=TXRetryDelay(_retryAttempt);if(delay>0){_retryAt=[NSDate dateWithTimeIntervalSinceNow:delay];_retryAttempt++;}else _retryExhausted=YES;
@@ -1222,13 +1254,21 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
                 app->_isBuilding=NO;app->_pendingAudioSignature=nil;
                 if([request[@"kind"] isEqual:@"start"]){
                     app->_audioReady=ok;app->_audioError=error;app->_usbMetering=metering;app->_usbMeterError=meterError;app->_monitoring=monitoring;app->_monitorError=monitorError;
-                    if(ok){[app saveSettings];app->_startedAt=NSDate.date;app->_progressAt=NSDate.date;app->_progressFrames=0;app->_signature=request[@"signature"];app->_canvas.message=TXL(@"믹서 실행 중 · 앱별 음량과 EQ가 선택한 출력에 적용됩니다.");}
+                    if(ok){[app saveSettings];app->_startedAt=NSDate.date;app->_progressAt=NSDate.date;app->_progressFrames=0;app->_signature=request[@"signature"];app->_audioTopologySignature=[app currentTopologySignature];app->_sourceUpdateBlocked=NO;app->_failedSourceSignature=nil;app->_canvas.message=TXL(@"믹서 실행 중 · 앱별 음량과 EQ가 선택한 출력에 적용됩니다.");}
                     else{app->_canvas.message=error;[app scheduleRecovery];}
                 }else{app->_committedSceneConfig=nil;app->_committedAudioRequest=nil;app->_halStopping=NO;app->_sceneStopping=NO;[app saveSettings];[app refreshDeviceMenus];app->_outputMenu.enabled=YES;app->_monitorMenu.enabled=YES;app->_monitorSlider.enabled=YES;app->_autoButton.enabled=YES;app->_usbMetersButton.enabled=YES;if(error.length)app->_audioError=error;if(!app->_sleeping)app->_canvas.message=app->_audioError.length?app->_audioError:TXL(@"믹서 중지 · 프로그램의 원래 출력이 복구되었습니다.");}
             }
             [app sendBrowserControls];[app updateStatus];[app writeStatusNow];[app processHALWork];
         });
     }});
+}
++ (BOOL)liveSourceSelfCheck {
+    TXHALCheckApp *fixture=[TXHALCheckApp new];fixture.ignoreHALSnapshots=YES;TXApp *app=fixture;TXSceneCheckAudio *audio=[TXSceneCheckAudio new];audio.simulateLive=YES;app->_audio=audio;app->_halQueue=dispatch_queue_create("local.tx6mac.live-check",DISPATCH_QUEUE_SERIAL);
+    app->_assignments=[@[@"local.tx6mac.system-sounds",@"native.video",@"native.new",@"",@"",@""] mutableCopy];app->_pendingSources=[@[@"",@"",@"",@"",@"",@""] mutableCopy];app->_outputs=@[@{@"id":@1,@"uid":@"main",@"name":@"Main",@"rate":@48000,@"channels":@2}];app->_outputUID=@"main";app->_monitorUID=@"";app->_appGroups=@{};app->_processes=@[@{@"key":@"native.video",@"ids":@[@10]},@{@"key":@"native.new",@"ids":@[@20]}];app->_halSnapshot=@{@"outputs":app->_outputs,@"processes":app->_processes,@"defaultUID":@"main"};app->_audioReady=YES;app->_desiredRunning=YES;app->_sceneProtected=YES;app->_audioTopologySignature=[app currentTopologySignature];app->_signature=@"before-new-source";atomic_store(&audio.state->callbacks,1000);atomic_store(&audio.state->master,.4);atomic_store(&audio.state->gain[1],.7);
+    BOOL (^until)(void)=^BOOL{NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:2];while(app->_halBusy&&deadline.timeIntervalSinceNow>0)[NSRunLoop.currentRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.002]];return !app->_halBusy;};
+    [app rebuildAudio];if(!until()||audio.liveUpdates!=1||audio.starts||audio.stops||audio.usedMain||app->_liveSourceUpdates!=1||!app->_audioReady||app->_halGeneration||atomic_load(&audio.state->callbacks)!=1000||atomic_load(&audio.state->transitionMuted)||fabs(atomic_load(&audio.state->gain[1])-.7)>1e-6||![audio.lastGroups[2] isEqual:@[@20]])return NO;
+    audio.failLive=YES;app->_assignments[2]=@"native.other";app->_processes=@[@{@"key":@"native.video",@"ids":@[@10]},@{@"key":@"native.other",@"ids":@[@21]}];app->_halSnapshot=@{@"outputs":app->_outputs,@"processes":app->_processes};[app rebuildAudio];if(!until()||audio.liveUpdates!=2||!app->_audioReady||!app->_audioError.length||audio.starts||audio.stops||![app->_assignments[2] isEqual:@"native.new"]||fabs(atomic_load(&audio.state->gain[1])-.7)>1e-6)return NO;app->_assignments[2]=@"native.other";[app rebuildAudio];if(audio.liveUpdates!=2||audio.starts||audio.stops||![app->_assignments[2] isEqual:@"native.new"])return NO;
+    printf("TX6Mac live source update preserves playback and bounds failed retries: PASS\n");return YES;
 }
 + (BOOL)sceneControllerSelfCheck {
     TXSceneCheckApp *fixture=[TXSceneCheckApp new];fixture.memoryDefaults=[TXSceneCheckDefaults new];TXApp *app=fixture;TXSceneCheckAudio *audio=[TXSceneCheckAudio new];TXSceneCheckGuard *guard=[TXSceneCheckGuard new];guard.audio=audio;
@@ -1462,6 +1502,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 }
 - (void)rebuildAudio {
     if(_sceneApplying||_sceneStopping||_sceneMIDIOverflow)return;
+    if(_desiredRunning&&!_sleeping&&!_explicitStop&&!_retryAt&&[self updateLiveSourcesIfPossible])return;
     if(_sceneProtected&&_desiredRunning&&!_sleeping&&!_explicitStop&&!_retryAt){[self recallSnapshot:[self runtimeSceneSnapshot] sceneID:_selectedSceneID recordUndo:NO runtime:YES];return;}
     if(!_desiredRunning||_sleeping||_explicitStop||_retryAt||(!_audioReady&&_retryExhausted))return;
     if(!_halSnapshotReady){[self requestHALSnapshot];return;}
@@ -1518,7 +1559,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (NSDictionary*)statusSnapshot {
     NSAssert(NSThread.isMainThread,@"Status snapshot belongs to the main thread");
     NSMutableArray *channels=[NSMutableArray array];TXRenderState *s=_audio.state;for(int i=0;i<6;i++)[channels addObject:@{@"slot":@(i+1),@"application":_assignments[i],@"gain":@(atomic_load(&s->gain[i])),@"muted":@(atomic_load(&s->muted[i])),@"eqLowMidHigh":@[@(atomic_load(&s->eq[i][0])),@(atomic_load(&s->eq[i][1])),@(atomic_load(&s->eq[i][2]))],@"peak":@(atomic_load(&s->peak[i])),@"usbPeak":@(atomic_load(&s->usbPeak[i])),@"usbRMS":@(atomic_load(&s->usbRMS[i])),@"route":@(atomic_load(&s->route[i]))}];
-    NSDictionary *d=@{@"syncCompensation":@(_syncCompensation),@"sync":_halSnapshot[@"sync"]?:@{},@"selectedSceneID":_selectedSceneID?:@"",@"selectedSceneName":[_sceneStore sceneWithID:_selectedSceneID][@"name"]?:@"",@"sceneTransitioning":@(_sceneApplying),@"sceneStopping":@(_sceneStopping),@"transitionMuted":@(atomic_load(&s->transitionMuted)),@"monitorUID":_monitorUID?:@"",@"monitorName":[self selectedMonitor][@"name"]?:_monitorName?:@"",@"monitoring":@(_monitoring&&_audioReady),@"monitorError":_monitorError?:@"",@"monitorGain":@(atomic_load(&s->monitorGain)),@"monitorPeak":@(atomic_load(&s->monitorPeak)),@"language":TXLanguageCode(),@"setupVisible":@(_setupWindow.visible),@"autoStart":@(_autoStart),@"audioStartConsent":@(_audioStartConsent),@"desiredRunning":@(_desiredRunning),@"explicitlyStopped":@(_explicitStop),@"retryAttempt":@(_retryAttempt),@"retryExhausted":@(_retryExhausted),@"retryPending":@(_retryAt!=nil),@"pickup":@(_pickup),@"running":@(_audioReady),@"audioBusy":@(_halBusy),@"usbMeters":@(_usbMeters),@"usbMetering":@(_usbMetering&&_audioReady),@"usbMeterDevice":[self usbMeterDevice][@"id"]?:@0,@"usbMeterError":_usbMeterError?:@"",@"audioStarting":@(_isBuilding),@"audioRequestGeneration":@(_halGeneration),@"autoAssign":@(_autoAssign),@"controllerSuspended":@(_deviceContext.suspended||_deviceContext.shiftDown),@"controllerShiftHeld":@(_deviceContext.shiftDown),@"controllerContextReasonCC":@(_deviceContext.reason),@"hudEnabled":@(_hudEnabled),@"hudVisible":@(_hud.isVisible),@"hudTitle":_hudView.application?:@"",@"hudMessage":_hudView.message?:@"",@"overflowApps":@(_overflowCount),@"browserConnected":@(_browser.connected),@"browserTabs":_browser.tabs?:@[],@"outputUID":_outputUID?:@"",@"outputName":[self selectedOutput][@"name"]?:@"",@"midiSources":_midi.sources?:@[],@"midiConnection":_midi.diagnostics?:@{},@"lastMIDI":_lastMIDI?:@"",@"master":@(atomic_load(&s->master)),@"masterMuted":@(atomic_load(&s->masterMuted)),@"callbacks":@(atomic_load(&s->callbacks)),@"frames":@(atomic_load(&s->frames)),@"limitedFrames":@(atomic_load(&s->limitedFrames)),@"remainderPeak":@(atomic_load(&s->peak[6])),@"outputPeak":@(atomic_load(&s->outputPeak)),@"sampleRate":@(s->sampleRate),@"physicalInputChannels":@(s->physicalInputChannels),@"tapCount":@(s->tapCount),@"layoutFault":@(atomic_load(&s->layoutFault)),@"error":_audioError?:@"",@"channels":channels};
+    NSDictionary *d=@{@"syncCompensation":@(_syncCompensation),@"sync":_halSnapshot[@"sync"]?:@{},@"selectedSceneID":_selectedSceneID?:@"",@"selectedSceneName":[_sceneStore sceneWithID:_selectedSceneID][@"name"]?:@"",@"sceneTransitioning":@(_sceneApplying),@"sceneStopping":@(_sceneStopping),@"transitionMuted":@(atomic_load(&s->transitionMuted)),@"monitorUID":_monitorUID?:@"",@"monitorName":[self selectedMonitor][@"name"]?:_monitorName?:@"",@"monitoring":@(_monitoring&&_audioReady),@"monitorError":_monitorError?:@"",@"monitorGain":@(atomic_load(&s->monitorGain)),@"monitorPeak":@(atomic_load(&s->monitorPeak)),@"language":TXLanguageCode(),@"setupVisible":@(_setupWindow.visible),@"autoStart":@(_autoStart),@"audioStartConsent":@(_audioStartConsent),@"desiredRunning":@(_desiredRunning),@"explicitlyStopped":@(_explicitStop),@"retryAttempt":@(_retryAttempt),@"retryExhausted":@(_retryExhausted),@"retryPending":@(_retryAt!=nil),@"pickup":@(_pickup),@"running":@(_audioReady),@"audioBusy":@(_halBusy),@"usbMeters":@(_usbMeters),@"usbMetering":@(_usbMetering&&_audioReady),@"usbMeterDevice":[self usbMeterDevice][@"id"]?:@0,@"usbMeterError":_usbMeterError?:@"",@"audioStarting":@(_isBuilding),@"audioRequestGeneration":@(_halGeneration),@"liveSourceUpdates":@(_liveSourceUpdates),@"autoAssign":@(_autoAssign),@"controllerSuspended":@(_deviceContext.suspended||_deviceContext.shiftDown),@"controllerShiftHeld":@(_deviceContext.shiftDown),@"controllerContextReasonCC":@(_deviceContext.reason),@"hudEnabled":@(_hudEnabled),@"hudVisible":@(_hud.isVisible),@"hudTitle":_hudView.application?:@"",@"hudMessage":_hudView.message?:@"",@"overflowApps":@(_overflowCount),@"browserConnected":@(_browser.connected),@"browserTabs":_browser.tabs?:@[],@"outputUID":_outputUID?:@"",@"outputName":[self selectedOutput][@"name"]?:@"",@"midiSources":_midi.sources?:@[],@"midiConnection":_midi.diagnostics?:@{},@"lastMIDI":_lastMIDI?:@"",@"master":@(atomic_load(&s->master)),@"masterMuted":@(atomic_load(&s->masterMuted)),@"callbacks":@(atomic_load(&s->callbacks)),@"frames":@(atomic_load(&s->frames)),@"limitedFrames":@(atomic_load(&s->limitedFrames)),@"remainderPeak":@(atomic_load(&s->peak[6])),@"outputPeak":@(atomic_load(&s->outputPeak)),@"sampleRate":@(s->sampleRate),@"physicalInputChannels":@(s->physicalInputChannels),@"tapCount":@(s->tapCount),@"layoutFault":@(atomic_load(&s->layoutFault)),@"error":_audioError?:@"",@"channels":channels};
     return d;
 }
 - (void)assignmentChanged:(NSPopUpButton*)sender {if(sender.tag==0||_sceneApplying||_sceneStopping)return;if([sender.selectedItem.representedObject isEqual:@"command:app-group"]){NSInteger slot=sender.tag;_processMenuSignature=nil;[self refreshDeviceMenus];[self showGroupEditorForSlot:slot];return;}NSMutableArray *proposed=[_assignments mutableCopy];proposed[sender.tag]=sender.selectedItem.representedObject?:@"";if(![TXSceneStore validateAssignments:proposed appGroups:_appGroups?:@{} chromeTabs:_browserTabMode error:NULL]){_processMenuSignature=nil;[self refreshDeviceMenus];return;}if([_assignments[sender.tag] hasPrefix:@"app-group:"]){[self applyGroupAssignment:proposed[sender.tag] definitions:TXAssignedAppGroups(proposed,_appGroups) slot:sender.tag error:NULL];return;}[_sceneReservations removeIndex:sender.tag];if(_pendingSources)_pendingSources[sender.tag]=@"";_autoAssign=NO;_autoButton.state=NSControlStateValueOff;_assignments[sender.tag]=sender.selectedItem.representedObject?:@"";_appGroups=TXAssignedAppGroups(_assignments,_appGroups);memset(_latched[sender.tag],0,sizeof(_latched[sender.tag]));memset(_havePrevious[sender.tag],0,sizeof(_havePrevious[sender.tag]));[self saveSettings];[self refreshDevices];if(_desiredRunning)[self rebuildAudio];}
@@ -1666,6 +1707,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 
 @implementation TXHALCheckApp
 - (void)saveSettings {}
+- (void)requestHALSnapshot {if(!self.ignoreHALSnapshots)[super requestHALSnapshot];}
 @end
 
 int main(void) {
@@ -1677,7 +1719,7 @@ int main(void) {
         if([args containsObject:@"--check-usb-meter-route"])return TXCheckUSBMeterRoute([args containsObject:@"--direct"]);
         if([args containsObject:@"--measure-usb-return"])return TXMeasureUSBReturn([args containsObject:@"--request-microphone"]);
         if([args containsObject:@"--ble-services"]||[args containsObject:@"--ble-observe"]||[args containsObject:@"--ble-ping"]||[args containsObject:@"--ble-ping-radio"]){NSUInteger target=[args containsObject:@"--ble-ping-radio"]?3:([args containsObject:@"--ble-ping"]?1:0);TXPrintBLEServices([args containsObject:@"--request-bluetooth"],target!=0||[args containsObject:@"--ble-observe"],target);return 0;}
-        if([args containsObject:@"--self-check"]){BOOL ok=TXRunSelfCheck() && TXRunMIDISelfCheck() && TXRunBrowserSelfCheck() && TXRunUIModelSelfCheck() && TXRunDeviceContextSelfCheck() && TXRunLocalizationSelfCheck() && TXRunLevelsSelfCheck() && TXRunSceneStoreSelfCheck() && [TXApp halSelfCheck] && [TXApp sceneControllerSelfCheck] && [TXApp appGroupSelfCheck] && [TXApp ordinaryGuardSelfCheck];printf("TX6Mac DSP/render self-check: %s\n",ok?"PASS":"FAIL");return ok?0:1;}
+        if([args containsObject:@"--self-check"]){BOOL ok=TXRunSelfCheck() && TXRunMIDISelfCheck() && TXRunBrowserSelfCheck() && TXRunUIModelSelfCheck() && TXRunDeviceContextSelfCheck() && TXRunLocalizationSelfCheck() && TXRunLevelsSelfCheck() && TXRunSceneStoreSelfCheck() && [TXApp halSelfCheck] && [TXApp sceneControllerSelfCheck] && [TXApp appGroupSelfCheck] && [TXApp ordinaryGuardSelfCheck] && [TXApp liveSourceSelfCheck];printf("TX6Mac DSP/render self-check: %s\n",ok?"PASS":"FAIL");return ok?0:1;}
         if([args containsObject:@"--diagnose"]){NSData *json=[NSJSONSerialization dataWithJSONObject:TXAudio.diagnostics options:NSJSONWritingPrettyPrinted error:nil];fwrite(json.bytes,1,json.length,stdout);puts("");return 0;}
         for(NSRunningApplication *running in [NSRunningApplication runningApplicationsWithBundleIdentifier:NSBundle.mainBundle.bundleIdentifier])if(running.processIdentifier!=NSProcessInfo.processInfo.processIdentifier){[running activateWithOptions:NSApplicationActivateAllWindows];return 0;}
         NSApplication *app=NSApplication.sharedApplication;[app setActivationPolicy:NSApplicationActivationPolicyRegular];__attribute__((objc_precise_lifetime)) TXApp *delegate=[TXApp new];app.delegate=delegate;[app run];

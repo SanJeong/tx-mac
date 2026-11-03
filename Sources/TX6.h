@@ -37,6 +37,8 @@ typedef struct {
     double currentEQ[TX_SLOTS][TX_EQ];
     TXFilter filters[TX_SLOTS][TX_EQ], syncMonitorFilters[TX_SLOTS][TX_EQ];
     TXSyncDelay syncDelay[TX_SLOTS];
+    _Atomic(uint64_t) syncCommand[TX_SLOTS], sourceUpdateCommand, sourceUpdateApplied;
+    uint64_t syncAppliedCommand[TX_SLOTS];
     _Atomic(UInt32) syncNowFlags, syncInputFlags, syncOutputFlags;
     _Atomic(uint64_t) syncNowHostTime, syncInputHostTime, syncOutputHostTime;
     _Atomic(double) syncInputToOutputMS, syncNowToOutputMS;
@@ -71,6 +73,7 @@ uint64_t TXRequestLevelPeakReset(TXRenderState *state);
 @property(nonatomic,readonly) AudioDeviceID device;
 @property(nonatomic) AudioDeviceID monitorOutputDevice;
 @property(nonatomic,readonly) BOOL monitoring;
+@property(nonatomic,readonly) BOOL liveUpdatesAvailable;
 // Configure and read diagnostics on the HAL worker; changes apply on the next guarded rebuild.
 @property(nonatomic) BOOL syncCompensationEnabled;
 @property(nonatomic,readonly) NSDictionary *syncDiagnostics;
@@ -80,6 +83,7 @@ uint64_t TXRequestLevelPeakReset(TXRenderState *state);
 @property(nonatomic,copy) NSArray<NSArray<NSString*>*> *slotBundleIDs;
 // HAL lifecycle and discovery are synchronous; call only on the app's serial HAL queue.
 - (BOOL)startOnDevice:(AudioDeviceID)device groups:(NSArray<NSArray<NSNumber*>*>*)groups;
+- (BOOL)updateGroups:(NSArray<NSArray<NSNumber*>*>*)groups bundleIDs:(NSArray<NSArray<NSString*>*>*)bundles error:(NSError**)error;
 - (void)stop;
 + (NSArray<NSDictionary*>*)outputs;
 + (NSArray<NSDictionary*>*)processes;
