@@ -14,10 +14,14 @@ static NSString *TXVolumeText(double gain) {return [NSString stringWithFormat:@"
 static double TXVolumeGain(NSInteger value) {return fmax(0,fmin(99,value))/99.0;}
 static NSString *TXVolumeHUD(double gain) {return [@"VOLUME " stringByAppendingString:TXVolumeText(gain)];}
 static NSColor *Color(unsigned hex) { return [NSColor colorWithSRGBRed:((hex>>16)&255)/255.0 green:((hex>>8)&255)/255.0 blue:(hex&255)/255.0 alpha:1]; }
-static NSFont *Mono(CGFloat size,NSFontWeight weight) { return [NSFont monospacedSystemFontOfSize:size weight:weight]; }
+static NSFont *Mono(CGFloat size,NSFontWeight weight) { return [NSFont monospacedSystemFontOfSize:size weight:weight]?:[NSFont fontWithName:@"Menlo" size:size]?:[NSFont systemFontOfSize:size weight:weight]; }
 static void Text(NSString *s,NSRect frame,NSFont *font,NSColor *color,NSTextAlignment alignment) {
+    if(!s.length)return;
     NSMutableParagraphStyle *p=[NSMutableParagraphStyle new];p.alignment=alignment;p.lineBreakMode=NSLineBreakByTruncatingTail;
-    [s drawInRect:frame withAttributes:@{NSFontAttributeName:font,NSForegroundColorAttributeName:color,NSParagraphStyleAttributeName:p}];
+    font=font?:[NSFont systemFontOfSize:11];color=color?:NSColor.textColor;
+    NSMutableDictionary *attributes=[NSMutableDictionary dictionaryWithCapacity:3];
+    if(font)attributes[NSFontAttributeName]=font;if(color)attributes[NSForegroundColorAttributeName]=color;if(p)attributes[NSParagraphStyleAttributeName]=p;
+    [s drawInRect:frame withAttributes:attributes];
 }
 static NSTextField *Label(NSString *s,NSRect frame,CGFloat size,BOOL mono) {
     NSTextField *v=[NSTextField labelWithString:s];v.frame=frame;v.font=mono?Mono(size,NSFontWeightRegular):[NSFont systemFontOfSize:size];v.textColor=Color(0x252625);v.lineBreakMode=NSLineBreakByTruncatingTail;return v;
@@ -376,6 +380,10 @@ static NSData *TXRepaintBytes(NSView *view,BOOL previous,void (^before)(void),vo
     NSInteger width=ceil(view.bounds.size.width),height=ceil(view.bounds.size.height);NSBitmapImageRep *bitmap=[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:width pixelsHigh:height bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];[NSGraphicsContext saveGraphicsState];NSGraphicsContext.currentContext=[NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];[Color(0xD8D9D4) setFill];NSRectFill(view.bounds);if(previous){before();[view drawRect:view.bounds];}current();[view drawRect:view.bounds];[NSGraphicsContext restoreGraphicsState];return [NSData dataWithBytes:bitmap.bitmapData length:bitmap.bytesPerRow*height];
 }
 static BOOL TXRunUIModelSelfCheck(void) {
+    @try {
+        TXCanvas *missingStyle=[[TXCanvas alloc] initWithFrame:NSMakeRect(0,0,1060,850)];
+        TXRepaintBytes(missingStyle,NO,^{},^{Text(@"TX · MAC",NSMakeRect(0,0,180,40),nil,Color(0x252625),NSTextAlignmentLeft);Text(@"MIDI WAIT",NSMakeRect(0,40,180,30),Mono(11,NSFontWeightRegular),nil,NSTextAlignmentLeft);Text(nil,NSZeroRect,nil,nil,NSTextAlignmentLeft);});
+    } @catch(NSException *exception){fprintf(stderr,"Missing drawing style must not crash: %s\n",exception.reason.UTF8String);return NO;}
     TXKnob *repaintKnob=[[TXKnob alloc] initWithFrame:NSMakeRect(0,0,76,92)];repaintKnob.caption=@"LOW";void (^knobBefore)(void)=^{repaintKnob.value=18;repaintKnob.awaitingPickup=YES;};void (^knobCurrent)(void)=^{repaintKnob.value=0;repaintKnob.awaitingPickup=NO;};if(![TXRepaintBytes(repaintKnob,YES,knobBefore,knobCurrent) isEqual:TXRepaintBytes(repaintKnob,NO,knobBefore,knobCurrent)]){fprintf(stderr,"Knob retained repaint differs from fresh pixels\n");return NO;}
     TXFader *repaintFader=[[TXFader alloc] initWithFrame:NSMakeRect(0,0,92,135)];void (^faderBefore)(void)=^{repaintFader.value=1;repaintFader.peak=1;};void (^faderCurrent)(void)=^{repaintFader.value=0;repaintFader.peak=0;};if(![TXRepaintBytes(repaintFader,YES,faderBefore,faderCurrent) isEqual:TXRepaintBytes(repaintFader,NO,faderBefore,faderCurrent)]){fprintf(stderr,"Fader retained repaint differs from fresh pixels\n");return NO;}
     TXChannel *repaintChannel=[[TXChannel alloc] initWithFrame:NSMakeRect(0,0,136,634)];void (^channelBefore)(void)=^{repaintChannel.slot=5;};void (^channelCurrent)(void)=^{repaintChannel.slot=0;};if(![TXRepaintBytes(repaintChannel,YES,channelBefore,channelCurrent) isEqual:TXRepaintBytes(repaintChannel,NO,channelBefore,channelCurrent)]){fprintf(stderr,"Channel retained repaint differs from fresh pixels\n");return NO;}
