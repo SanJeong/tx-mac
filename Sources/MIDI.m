@@ -181,6 +181,32 @@ static BOOL TXIsMixerName(NSString *name) {
     return [n containsString:@"tx-6"]||[n containsString:@"tx–6"]||[n containsString:@"tx6"];
 }
 
+// Drivers publish Offline on devices; endpoints inherit it. Unknown state is not online.
+static BOOL TXMIDIOnline(MIDIEndpointRef endpoint,MIDIObjectRef owner,OSStatus (^read)(MIDIObjectRef,SInt32*)) {
+    SInt32 endpointOffline=0,ownerOffline=0;
+    OSStatus endpointStatus=read(endpoint,&endpointOffline),ownerStatus=owner?read(owner,&ownerOffline):kMIDIUnknownProperty;
+    if((endpointStatus==noErr&&endpointOffline)||(ownerStatus==noErr&&ownerOffline))return NO;
+    return endpointStatus==noErr||ownerStatus==noErr;
+}
+// Preserve BLE until a USB source has actually connected, rather than merely appeared.
+static void TXMIDIReconcile(NSArray *candidates,NSString *transport,NSMutableDictionary *connected,
+                           OSStatus (^connect)(NSNumber*),void (^disconnect)(NSNumber*)) {
+    NSMutableDictionary *eligible=[NSMutableDictionary dictionary];
+    for(NSDictionary *candidate in candidates){BOOL ble=[candidate[@"ble"] boolValue];
+        if(([transport isEqual:@"usb"]&&ble)||([transport isEqual:@"ble"]&&!ble))continue;
+        eligible[candidate[@"endpoint"]]=candidate;
+    }
+    for(NSNumber *source in connected.allKeys)if(!eligible[source]){disconnect(source);[connected removeObjectForKey:source];}
+    for(NSNumber *source in eligible)if(![eligible[source][@"ble"] boolValue]){
+        if(connected[source]||connect(source)==noErr)connected[source]=eligible[source];
+    }
+    BOOL usb=NO;for(NSDictionary *candidate in connected.allValues)if(![candidate[@"ble"] boolValue])usb=YES;
+    for(NSNumber *source in eligible)if([eligible[source][@"ble"] boolValue]){
+        if([transport isEqual:@"auto"]&&usb){if(connected[source]){disconnect(source);[connected removeObjectForKey:source];}}
+        else if(connected[source]||connect(source)==noErr)connected[source]=eligible[source];
+    }
+}
+
 static BOOL TXBLEMatchesDiscovery(NSString *cachedName,NSString *advertisedName) {
     return TXIsMixerName(cachedName)||TXIsMixerName(advertisedName);
 }
@@ -474,21 +500,18 @@ static NSTimeInterval TXMIDIRetryDelay(NSUInteger attempt) {
         NSString *driver=MIDIString(owner,kMIDIPropertyDriverOwner);
         NSString *descriptor=[[NSString stringWithFormat:@"%@ %@ %@ %@",name,model,manufacturer,driver] lowercaseString];
         if([descriptor rangeOfString:@"tx-6"].location==NSNotFound&&[descriptor rangeOfString:@"tx–6"].location==NSNotFound&&[descriptor rangeOfString:@"tx6"].location==NSNotFound)continue;
-        SInt32 offline=0;MIDIObjectGetIntegerProperty(endpoint,kMIDIPropertyOffline,&offline);if(offline)continue;
+        if(!TXMIDIOnline(endpoint,owner,^OSStatus(MIDIObjectRef object,SInt32 *offline){return MIDIObjectGetIntegerProperty(object,kMIDIPropertyOffline,offline);}))continue;
         BOOL ble=[descriptor containsString:@"bluetooth"]||[descriptor containsString:@"ble midi"];
         [candidates addObject:@{@"endpoint":@(endpoint),@"name":name.length?name:@"TX-6",@"ble":@(ble),@"driver":driver}];
     }
-    BOOL haveUSB=NO;for(NSDictionary *d in candidates)if(![d[@"ble"] boolValue])haveUSB=YES;
-    NSMutableDictionary *wanted=[NSMutableDictionary dictionary];
-    for(NSDictionary *d in candidates){BOOL ble=[d[@"ble"] boolValue];
-        if([_transport isEqual:@"usb"]&&ble)continue;if([_transport isEqual:@"ble"]&&!ble)continue;
-        if([_transport isEqual:@"auto"]&&haveUSB&&ble)continue;wanted[d[@"endpoint"]]=d;
-    }
-    for(NSNumber *source in _connected.allKeys)if(!wanted[source]){MIDIPortDisconnectSource(_port,source.unsignedIntValue);[_connected removeObjectForKey:source];[_pending removeObjectForKey:source];[_runningStatus removeObjectForKey:source];}
-    for(NSNumber *source in wanted)if(!_connected[source]){
-        OSStatus status=MIDIPortConnectSource(_port,source.unsignedIntValue,(void*)(uintptr_t)source.unsignedIntValue);
-        if(status==noErr)_connected[source]=wanted[source];else NSLog(@"MIDI connect error %d",(int)status);
-    }
+    TXMIDIReconcile(candidates,_transport,_connected,^OSStatus(NSNumber *source){
+        OSStatus status=MIDIPortConnectSource(self->_port,source.unsignedIntValue,(void*)(uintptr_t)source.unsignedIntValue);
+        if(status!=noErr)NSLog(@"MIDI connect error %d",(int)status);return status;
+    },^(NSNumber *source){
+        MIDIPortDisconnectSource(self->_port,source.unsignedIntValue);
+        [self->_pending removeObjectForKey:source];[self->_runningStatus removeObjectForKey:source];
+    });
+    BOOL haveUSB=NO;for(NSDictionary *d in _connected.allValues)if(![d[@"ble"] boolValue])haveUSB=YES;
     NSMutableArray *names=[NSMutableArray array];for(NSNumber *source in [_connected.allKeys sortedArrayUsingSelector:@selector(compare:)]){NSDictionary *d=_connected[source];[names addObject:[NSString stringWithFormat:@"%@ · %@",d[@"name"],[d[@"ble"] boolValue]?@"Bluetooth":@"USB"]];}
     if(_connected.count==0&&_ble.direct&&![_transport isEqual:@"usb"])[names addObject:@"TX-6 · Bluetooth"];
     BOOL endpointsChanged=![previousEndpoints isEqual:[NSSet setWithArray:_connected.allKeys]];
@@ -519,6 +542,27 @@ static NSTimeInterval TXMIDIRetryDelay(NSUInteger attempt) {
     [_connected removeAllObjects];[_pending removeAllObjects];[_runningStatus removeAllObjects];_sources=@[];
 }
 + (BOOL)selfCheck {
+    NSDictionary *usb=@{@"endpoint":@11,@"ble":@NO},*bleSource=@{@"endpoint":@12,@"ble":@YES};
+    NSMutableDictionary *links=[@{@12:bleSource} mutableCopy];NSMutableArray *removed=[NSMutableArray array],*attempts=[NSMutableArray array];
+    __block BOOL usbWorks=NO;
+    OSStatus (^connect)(NSNumber*)=^OSStatus(NSNumber *source){[attempts addObject:source];return [source isEqual:@11]&&!usbWorks?-1:noErr;};
+    void (^disconnect)(NSNumber*)=^(NSNumber *source){[removed addObject:source];};
+    TXMIDIReconcile(@[usb,bleSource],@"auto",links,connect,disconnect);
+    if(links[@11]||!links[@12]||removed.count||![attempts isEqual:@[@11]])return NO;
+    usbWorks=YES;TXMIDIReconcile(@[usb,bleSource],@"auto",links,connect,disconnect);
+    if(!links[@11]||links[@12]||![removed isEqual:@[@12]])return NO;
+    TXMIDIReconcile(@[bleSource],@"auto",links,connect,disconnect);
+    if(links[@11]||!links[@12]||![removed isEqual:@[@12,@11]])return NO;
+    TXMIDIReconcile(@[usb,bleSource],@"ble",links,connect,disconnect);if(links[@11]||!links[@12])return NO;
+    usbWorks=NO;TXMIDIReconcile(@[usb,bleSource],@"usb",links,connect,disconnect);if(links.count)return NO;
+    TXMIDIReconcile(@[usb,bleSource],@"auto",links,connect,disconnect);if(links[@11]||!links[@12])return NO;
+    for(int scenario=0;scenario<5;scenario++){
+        BOOL online=TXMIDIOnline(11,21,^OSStatus(MIDIObjectRef object,SInt32 *offline){
+            *offline=(scenario==1&&object==21)||(scenario==2&&object==11);
+            return scenario==4||(scenario==3&&object==11)?kMIDIUnknownProperty:noErr;
+        });
+        if(online!=(scenario==0||scenario==3))return NO;
+    }
     TXMIDIStartupFixture *cancelled=[TXMIDIStartupFixture new];TXMIDI *cancelledState=cancelled;
     [cancelled start];NSUInteger cancelledGeneration=cancelledState->_generation;
     [cancelled stop];[cancelled stop];[cancelled retryStartupForGeneration:cancelledGeneration];

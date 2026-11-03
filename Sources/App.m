@@ -53,6 +53,29 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
     TXKey *b=[[TXKey alloc] initWithFrame:frame];b.title=title;b.target=target;b.action=action;b.buttonType=NSButtonTypeMomentaryPushIn;b.bordered=NO;b.lightKey=![title containsString:@"MUTE"]&&![title containsString:@"FX "];b.font=[NSFont systemFontOfSize:11 weight:NSFontWeightMedium];return b;
 }
 
+@interface TXSettingsView:NSView
+@end
+@implementation TXSettingsView
+- (BOOL)isFlipped{return YES;}
+- (BOOL)isOpaque{return YES;}
+- (BOOL)allowsVibrancy{return NO;}
+- (void)drawRect:(NSRect)dirty {[Color(0xD8D9D4) setFill];NSRectFill(self.bounds);}
+@end
+@interface TXSettingsTabs:NSSegmentedControl
+@end
+@implementation TXSettingsTabs
+- (BOOL)acceptsFirstResponder{return self.enabled;}
+- (void)drawRect:(NSRect)dirty {
+    CGFloat width=self.bounds.size.width/MAX(1,self.segmentCount);
+    for(NSInteger i=0;i<self.segmentCount;i++){BOOL selected=self.selectedSegment==i;NSRect face=NSInsetRect(NSMakeRect(i*width,0,width,self.bounds.size.height),1,1);[Color(selected?0x30342D:0xECECE7) setFill];NSRectFill(face);[Color(0x92998B) setStroke];NSFrameRect(face);Text([self labelForSegment:i],NSInsetRect(face,6,7),Mono(12,NSFontWeightMedium),Color(selected?0xF1F2E9:0x252625),NSTextAlignmentCenter);}
+    if(self.window.firstResponder==self){[Color(0x555B51) setStroke];NSFrameRect(NSInsetRect(self.bounds,.5,.5));}
+}
+- (void)keyDown:(NSEvent*)event {if(event.keyCode==123||event.keyCode==124){self.selectedSegment=MAX(0,MIN(self.segmentCount-1,self.selectedSegment+(event.keyCode==123?-1:1)));[self sendAction:self.action to:self.target];self.needsDisplay=YES;}else [super keyDown:event];}
+@end
+static CGFloat TXSettingsStatusHeight(NSTextField *field) {
+    if(!field.stringValue.length)return 0;CGFloat height=ceil([field.cell cellSizeForBounds:NSMakeRect(0,0,384,1000)].height)+6;if([field.stringValue containsString:@"\n"])height=MAX(34,height);return MIN(36,MAX(20,height));
+}
+
 @interface TXCanvas:NSView
 @property(nonatomic,copy) NSString *connection,*output,*monitor,*message;
 @property(nonatomic) float master;
@@ -60,6 +83,7 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
 @end
 @implementation TXCanvas
 - (BOOL)isFlipped{return YES;}
+- (BOOL)isOpaque{return YES;}
 - (void)drawRect:(NSRect)dirty {
     [Color(0xD8D9D4) setFill];NSRectFill(self.bounds);
     Text(@"TX · MAC",NSMakeRect(24,18,330,37),Mono(29,NSFontWeightBold),Color(0x252625),NSTextAlignmentLeft);
@@ -87,6 +111,7 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
 @end
 @implementation TXKnob
 - (BOOL)isFlipped{return YES;}
+- (BOOL)isOpaque{return YES;}
 - (BOOL)acceptsFirstResponder{return self.enabled;}
 - (BOOL)isAccessibilityElement{return YES;}
 - (NSString*)accessibilityRole{return NSAccessibilitySliderRole;}
@@ -100,6 +125,7 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
 
 - (void)setValue:(double)value{double next=isfinite(value)?fmax(-18,fmin(18,value)):0;if(_value==next)return;_value=next;self.needsDisplay=YES;NSAccessibilityPostNotification(self,NSAccessibilityValueChangedNotification);}
 - (void)drawRect:(NSRect)dirty {
+    [Color(0xD8D9D4) setFill];NSRectFill(self.bounds);
     NSPoint center=NSMakePoint(NSMidX(self.bounds),43);CGFloat r=23;
     Text(self.caption?:@"",NSMakeRect(0,0,self.bounds.size.width,16),Mono(9,NSFontWeightSemibold),Color(0x555953),NSTextAlignmentCenter);
     [Color(0xB4B7AE) setStroke];NSBezierPath *arc=[NSBezierPath bezierPath];arc.lineWidth=3;[arc appendBezierPathWithArcWithCenter:center radius:r+4 startAngle:135 endAngle:405 clockwise:NO];[arc stroke];
@@ -128,6 +154,7 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
 @end
 @implementation TXFader
 - (BOOL)isFlipped{return YES;}
+- (BOOL)isOpaque{return YES;}
 - (BOOL)acceptsFirstResponder{return self.enabled;}
 - (BOOL)isAccessibilityElement{return YES;}
 - (NSString*)accessibilityRole{return NSAccessibilitySliderRole;}
@@ -141,6 +168,7 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
 
 - (void)setValue:(double)value{double next=isfinite(value)?fmax(0,fmin(1,value)):0;if(_value==next)return;_value=next;self.needsDisplay=YES;NSAccessibilityPostNotification(self,NSAccessibilityValueChangedNotification);}
 - (void)drawRect:(NSRect)dirty {
+    [Color(0xD8D9D4) setFill];NSRectFill(self.bounds);
     if(self.rotary){NSPoint center=NSMakePoint(NSMidX(self.bounds),63);CGFloat r=46;[Color(0xECECE7) setFill];NSBezierPath *cap=[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(center.x-r,center.y-r,r*2,r*2)];[cap fill];[Color(0x747C6B) setStroke];cap.lineWidth=1.2;[cap stroke];
         NSBezierPath *ring=[NSBezierPath bezierPath];ring.lineWidth=3;[ring appendBezierPathWithArcWithCenter:center radius:r+6 startAngle:135 endAngle:405 clockwise:NO];[Color(0xA5AE9B) setStroke];[ring stroke];
         double angle=(135+self.value*270)*M_PI/180;NSBezierPath *pointer=[NSBezierPath bezierPath];pointer.lineWidth=4;pointer.lineCapStyle=NSLineCapStyleRound;[pointer moveToPoint:center];[pointer lineToPoint:NSMakePoint(center.x+cos(angle)*(r-9),center.y+sin(angle)*(r-9))];[Color(0x252625) setStroke];[pointer stroke];Text(TXVolumeText(self.value),NSMakeRect(0,127,self.bounds.size.width,22),Mono(15,NSFontWeightMedium),Color(0x252625),NSTextAlignmentCenter);return;}
@@ -198,7 +226,9 @@ static NSButton *Button(NSString *title,NSRect frame,id target,SEL action) {
 @end
 @implementation TXChannel
 - (BOOL)isFlipped{return YES;}
+- (BOOL)isOpaque{return YES;}
 - (void)drawRect:(NSRect)dirty {
+    [Color(0xD8D9D4) setFill];NSRectFill(self.bounds);
     [Color(0xBDC1B7) setFill];NSRectFill(NSMakeRect(self.bounds.size.width-1,0,1,self.bounds.size.height));
     Text([NSString stringWithFormat:@"%02ld",(long)self.slot+1],NSMakeRect(10,8,self.bounds.size.width-20,35),Mono(27,NSFontWeightMedium),Color(0x252625),NSTextAlignmentLeft);
     Text(self.slot==0?@"OS / SOUND":@"APP / INPUT",NSMakeRect(10,43,self.bounds.size.width-20,14),Mono(8,NSFontWeightMedium),Color(0x666B61),NSTextAlignmentLeft);
@@ -342,7 +372,13 @@ static float TXSavedMonitorGain(id value) {
     return fmax(0,fmin(1,[value doubleValue]));
 }
 static NSArray<NSString*> *TXRouteTitles(void) {return @[TXL(@"메인"),TXL(@"미리 듣기"),TXL(@"둘 다"),TXL(@"끔")];}
+static NSData *TXRepaintBytes(NSView *view,BOOL previous,void (^before)(void),void (^current)(void)) {
+    NSInteger width=ceil(view.bounds.size.width),height=ceil(view.bounds.size.height);NSBitmapImageRep *bitmap=[[NSBitmapImageRep alloc] initWithBitmapDataPlanes:NULL pixelsWide:width pixelsHigh:height bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:0 bitsPerPixel:0];[NSGraphicsContext saveGraphicsState];NSGraphicsContext.currentContext=[NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];[Color(0xD8D9D4) setFill];NSRectFill(view.bounds);if(previous){before();[view drawRect:view.bounds];}current();[view drawRect:view.bounds];[NSGraphicsContext restoreGraphicsState];return [NSData dataWithBytes:bitmap.bitmapData length:bitmap.bytesPerRow*height];
+}
 static BOOL TXRunUIModelSelfCheck(void) {
+    TXKnob *repaintKnob=[[TXKnob alloc] initWithFrame:NSMakeRect(0,0,76,92)];repaintKnob.caption=@"LOW";void (^knobBefore)(void)=^{repaintKnob.value=18;repaintKnob.awaitingPickup=YES;};void (^knobCurrent)(void)=^{repaintKnob.value=0;repaintKnob.awaitingPickup=NO;};if(![TXRepaintBytes(repaintKnob,YES,knobBefore,knobCurrent) isEqual:TXRepaintBytes(repaintKnob,NO,knobBefore,knobCurrent)]){fprintf(stderr,"Knob retained repaint differs from fresh pixels\n");return NO;}
+    TXFader *repaintFader=[[TXFader alloc] initWithFrame:NSMakeRect(0,0,92,135)];void (^faderBefore)(void)=^{repaintFader.value=1;repaintFader.peak=1;};void (^faderCurrent)(void)=^{repaintFader.value=0;repaintFader.peak=0;};if(![TXRepaintBytes(repaintFader,YES,faderBefore,faderCurrent) isEqual:TXRepaintBytes(repaintFader,NO,faderBefore,faderCurrent)]){fprintf(stderr,"Fader retained repaint differs from fresh pixels\n");return NO;}
+    TXChannel *repaintChannel=[[TXChannel alloc] initWithFrame:NSMakeRect(0,0,136,634)];void (^channelBefore)(void)=^{repaintChannel.slot=5;};void (^channelCurrent)(void)=^{repaintChannel.slot=0;};if(![TXRepaintBytes(repaintChannel,YES,channelBefore,channelCurrent) isEqual:TXRepaintBytes(repaintChannel,NO,channelBefore,channelCurrent)]){fprintf(stderr,"Channel retained repaint differs from fresh pixels\n");return NO;}
     if(![TXVolumeText(0) isEqual:@"0"]||![TXVolumeText(.5) isEqual:@"50"]||![TXVolumeText(1) isEqual:@"99"]||TXVolumeGain(99)!=1||fabs(TXVolumeGain(25)-25.0/99)>1e-12||![TXVolumeHUD(1) isEqual:@"VOLUME 99"])return NO;
     TXFader *volume=[TXFader new];volume.value=98.0/99;[volume accessibilityPerformIncrement];if(fabs(volume.value-1)>1e-12||![volume.accessibilityValueDescription isEqual:@"99"])return NO;
     NSEvent *left=[NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil characters:@"" charactersIgnoringModifiers:@"" isARepeat:NO keyCode:123];[volume keyDown:left];if(fabs(volume.value-98.0/99)>1e-12)return NO;
@@ -587,9 +623,10 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     TXAudio *_audio;TXMIDI *_midi;TXBrowserBridge *_browser;NSDate *_lastBrowserSend;NSTextField *_browserLabel;NSWindow *_window;TXCanvas *_canvas;NSStatusItem *_statusItem;
     NSMenu *_statusMenu;CABTLEMIDIWindowController *_bluetooth;
     NSPopUpButton *_outputMenu,*_monitorMenu,*_transportMenu,*_languageMenu;NSSlider *_monitorSlider;NSTextField *_monitorLevelLabel;NSWindow *_setupWindow;NSTextField *_setupDevice,*_setupAudio;NSButton *_setupStart;BOOL _sleepResume,_sleeping,_autoStart,_explicitStop,_retryExhausted,_audioStartConsent;NSUInteger _retryAttempt;NSDate *_retryAt,*_lastStatusWrite;NSButton *_autoStartButton;NSButton *_startButton,*_pickupButton,*_invertButton,*_masterMute,*_soundKey,*_autoButton,*_hudButton;TXHUDPanel *_hud;TXHUDView *_hudView;NSTimer *_hudDismiss;NSDictionary *_pendingHUD;BOOL _hudEnabled,_statusMenuTracking;NSPopover *_settingsPopover;TXDeviceContext _deviceContext;NSTextField *_deviceContextLabel,*_calibrationInput;NSButton *_resumeDeviceButton;
+    NSView *_settingsRoot,*_settingsBody;NSSegmentedControl *_settingsTabs;NSArray<NSArray<NSView*>*> *_settingsPages;NSArray<NSControl*> *_settingsFocusViews;NSInteger _settingsTab;NSString *_settingsLayoutSignature;NSTextField *_settingsLanguageLabel,*_settingsCalibrationLabel,*_settingsCalibrationNote;NSButton *_settingsGuideButton,*_settingsBluetoothButton,*_settingsEQButton,*_settingsLevelsButton,*_settingsCalibrationButton;
     TXLevelsController *_levelsController;TXLevelSnapshot _levelSnapshot;
     TXFader *_masterFader;NSArray<TXChannel*> *_channels;NSTextField *_remainderLabel;
-    BOOL _syncCompensation;NSButton *_syncButton;NSTextField *_syncLabel;BOOL _browserTabMode,_controllerConnected,_followDefaultOutput,_usbMeters,_usbMetering;NSButton *_usbMetersButton;NSTextField *_usbMetersStatus;NSString *_usbMeterError,*_monitorError,*_monitorUID,*_monitorName;BOOL _monitoring;NSButton *_browserTabsButton;
+    BOOL _syncCompensation;NSButton *_syncButton;NSTextField *_syncLabel;BOOL _browserTabMode,_followDefaultOutput,_usbMeters,_usbMetering;NSButton *_usbMetersButton;NSTextField *_usbMetersStatus;NSString *_usbMeterError,*_monitorError,*_monitorUID,*_monitorName;BOOL _monitoring;NSButton *_browserTabsButton;
     NSArray<NSDictionary*> *_outputs,*_processes;NSMutableArray<NSString*> *_assignments;NSString *_outputUID,*_signature,*_statusFile,*_lastMIDI;
     NSTimer *_poll,*_meter;BOOL _desiredRunning,_isBuilding,_pickup,_invert,_autoAssign;NSInteger _overflowCount;NSString *_outputMenuSignature,*_processMenuSignature;NSDate *_startedAt,*_progressAt;uint64_t _progressFrames;BOOL _latched[6][4];double _previous[6][4];BOOL _havePrevious[6][4];
     NSMenuItem *_masterMenuLabel;NSSlider *_menuMaster;NSMutableArray<NSMenuItem*> *_muteItems;NSDate *_lastSave,*_lastLimitDate;uint64_t _lastLimitedFrames;
@@ -607,7 +644,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     [self loadSettings];[self buildWindow];[self buildStatusItem];[self refreshDevices];[self requestHALSnapshot];
     __weak TXApp *weakSelf=self;_midi.received=^(NSString *source,UInt8 channel,UInt8 cc,UInt8 value){[weakSelf handleMIDI:source channel:channel cc:cc value:value];};
     _browser.changed=^{dispatch_async(dispatch_get_main_queue(),^{[weakSelf browserChanged];});};[_browser start];
-    _midi.changed=^{dispatch_async(dispatch_get_main_queue(),^{[weakSelf deviceConnectionChanged];});};[_midi start];
+    _midi.changed=^{if(NSThread.isMainThread)[weakSelf deviceConnectionChanged];else dispatch_async(dispatch_get_main_queue(),^{[weakSelf deviceConnectionChanged];});};[_midi start];
     _poll=[NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(poll:) userInfo:nil repeats:YES];
     _meter=[NSTimer scheduledTimerWithTimeInterval:0.1 target:self selector:@selector(tick:) userInfo:nil repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:_poll forMode:NSRunLoopCommonModes];[[NSRunLoop mainRunLoop] addTimer:_meter forMode:NSRunLoopCommonModes];
@@ -832,37 +869,36 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     _masterFader=[[TXFader alloc] initWithFrame:NSMakeRect(874,366,150,153)];_browserLabel.stringValue=_browser.connected?TXL(@"Chrome 오디오 탭 자동 감지 · 음소거 바로 가능\n개별 음량·EQ는 해당 탭에서 ⌘⇧6으로 연결"):TXL(@"Chrome 확장을 연결하면 재생 탭 자동 감지\n개별 음량·EQ 연결 단축키: ⌘⇧6");_remainderLabel.stringValue=_overflowCount>0?[NSString stringWithFormat:TXL(@"추가 %ld개 앱은 MASTER 적용"),(long)_overflowCount]:TXL(@"미지정 앱도 MASTER 적용");_masterFader.rotary=YES;_masterFader.value=atomic_load(&s->master);_masterFader.target=self;_masterFader.action=@selector(masterChanged:);_masterFader.accessibilityRole=NSAccessibilitySliderRole;_masterFader.accessibilityLabel=TXL(@"전체 음량");[_canvas addSubview:_masterFader];
     _soundKey=Button(@"FX I\nSOUND",NSMakeRect(865,540,78,44),self,@selector(soundKey:));[_canvas addSubview:_soundKey];_masterMute=Button(@"FX II\nMUTE",NSMakeRect(954,540,78,44),self,@selector(muteKey:));[_canvas addSubview:_masterMute];
     [_canvas addSubview:Label(@"MON LEVEL",NSMakeRect(865,602,110,15),9,YES)];_monitorLevelLabel=Label(@"",NSMakeRect(975,602,57,15),9,YES);_monitorLevelLabel.alignment=NSTextAlignmentRight;[_canvas addSubview:_monitorLevelLabel];_monitorSlider=[[TXMonitorSlider alloc] initWithFrame:NSMakeRect(865,620,167,22)];_monitorSlider.doubleValue=atomic_load(&s->monitorGain);_monitorSlider.target=self;_monitorSlider.action=@selector(monitorGainChanged:);_monitorSlider.accessibilityLabel=TXL(@"미리 듣기 음량");[_canvas addSubview:_monitorSlider];[self updateMonitorLevel];
-    _autoButton=[NSButton checkboxWithTitle:TXL(@"자동 앱 매칭") target:self action:@selector(autoChanged:)];_autoButton.frame=NSMakeRect(863,673,167,21);_autoButton.state=_autoAssign?NSControlStateValueOn:NSControlStateValueOff;_autoButton.font=[NSFont systemFontOfSize:11];_autoButton.toolTip=TXL(@"재생 앱을 빈 채널에 배정합니다. 일시정지해도 채널과 물리 음량·EQ·음소거는 고정됩니다. 수동 지정하면 자동 매칭이 꺼집니다.");
-    _pickupButton=[NSButton checkboxWithTitle:TXL(@"하드웨어 픽업") target:self action:@selector(settingsChanged:)];_pickupButton.frame=NSMakeRect(863,701,167,21);_pickupButton.state=_pickup?NSControlStateValueOn:NSControlStateValueOff;_pickupButton.font=[NSFont systemFontOfSize:11];_pickupButton.toolTip=TXL(@"기본은 꺼짐이며 페이더와 노브가 즉시 반응합니다. 켜면 현재 맥 값에 맞출 때까지 기다리는 소프트 픽업을 사용합니다.");
-    _invertButton=[NSButton checkboxWithTitle:TXL(@"페이더 방향 반전") target:self action:@selector(settingsChanged:)];_invertButton.frame=NSMakeRect(863,729,167,21);_invertButton.state=_invert?NSControlStateValueOn:NSControlStateValueOff;_invertButton.font=[NSFont systemFontOfSize:11];NSViewController *settings=[NSViewController new];settings.view=[[NSView alloc] initWithFrame:NSMakeRect(0,0,400,672)];
-    [settings.view addSubview:Label(TXL(@"언어"),NSMakeRect(18,628,100,24),11,NO)];
-    _languageMenu=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(122,626,260,28) pullsDown:NO];_languageMenu.target=self;_languageMenu.action=@selector(languageChanged:);_languageMenu.accessibilityLabel=TXL(@"언어");
-    for(NSArray *entry in @[@[TXL(@"시스템 설정"),@"system"],@[@"English",@"en"],@[@"한국어",@"ko"],@[@"日本語",@"ja"]]){[_languageMenu addItemWithTitle:entry[0]];_languageMenu.lastItem.representedObject=entry[1];if([entry[1] isEqual:TXLanguageCode()])[_languageMenu selectItem:_languageMenu.lastItem];}[settings.view addSubview:_languageMenu];
-    _autoStartButton=[NSButton checkboxWithTitle:TXL(@"믹서 자동 시작 및 연결 복구") target:self action:@selector(autoStartChanged:)];_autoStartButton.frame=NSMakeRect(18,582,364,25);_autoStartButton.state=_autoStart?NSControlStateValueOn:NSControlStateValueOff;[settings.view addSubview:_autoStartButton];
-    [settings.view addSubview:Button(TXL(@"시작 안내 및 권한…"),NSMakeRect(18,536,364,30),self,@selector(showSetup:))];
-    _browserTabsButton=[NSButton checkboxWithTitle:TXL(@"Chrome 탭별 채널 사용") target:self action:@selector(browserModeChanged:)];_browserTabsButton.frame=NSMakeRect(18,505,364,24);_browserTabsButton.state=_browserTabMode?NSControlStateValueOn:NSControlStateValueOff;_browserTabsButton.toolTip=TXL(@"기본은 Chrome 전체 한 채널입니다. 켜면 개별 탭만 표시합니다. 탭별 음량·EQ는 각 탭에서 ⌘⇧6 연결이 필요합니다.");[settings.view addSubview:_browserTabsButton];
-    _autoButton.frame=NSMakeRect(18,473,364,24);_pickupButton.frame=NSMakeRect(18,437,324,24);_invertButton.frame=NSMakeRect(18,401,324,24);[settings.view addSubview:_autoButton];[settings.view addSubview:_pickupButton];[settings.view addSubview:_invertButton];_hudButton=[NSButton checkboxWithTitle:TXL(@"조절 시 상태 표시") target:self action:@selector(settingsChanged:)];_hudButton.frame=NSMakeRect(18,365,324,24);_hudButton.state=_hudEnabled?NSControlStateValueOn:NSControlStateValueOff;[settings.view addSubview:_hudButton];
-    _deviceContextLabel=Label(TXL(@"TX-6 홈 화면 확인 필요"),NSMakeRect(18,311,324,40),11,NO);_deviceContextLabel.maximumNumberOfLines=2;_deviceContextLabel.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:_deviceContextLabel];
-    _resumeDeviceButton=Button(TXL(@"기기 홈 화면 확인 · TX-6 제어 재개"),NSMakeRect(18,276,324,29),self,@selector(resumeDeviceControls:));[settings.view addSubview:_resumeDeviceButton];
-    [settings.view addSubview:Label(TXL(@"기기 현재 메인 숫자와 맞추기 (0~99)"),NSMakeRect(18,243,324,22),11,NO)];
-    _calibrationInput=[[NSTextField alloc] initWithFrame:NSMakeRect(18,207,99,27)];_calibrationInput.placeholderString=@"0–99";_calibrationInput.font=Mono(12,NSFontWeightMedium);_calibrationInput.alignment=NSTextAlignmentCenter;_calibrationInput.target=self;_calibrationInput.action=@selector(calibrateMaster:);_calibrationInput.accessibilityLabel=TXL(@"TX-6 현재 메인 숫자 0부터 99");[settings.view addSubview:_calibrationInput];
-    [settings.view addSubview:Button(TXL(@"맥 전체 음량에 맞춤"),NSMakeRect(130,207,212,28),self,@selector(calibrateMaster:))];NSTextField *calibrationNote=Label(TXL(@"입력한 숫자를 맥 전체 음량(0~99)으로 설정합니다.\n기기 자동 조회·상시 동기화 기능은 아닙니다."),NSMakeRect(18,151,324,46),10,NO);calibrationNote.maximumNumberOfLines=2;calibrationNote.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:calibrationNote];[settings.view addSubview:Label(TXL(@"CH 01 시스템 사운드 고정 · CH 02–06 앱 / 탭"),NSMakeRect(18,109,324,24),10,NO)];_browserLabel=Label(TXL(@"Chrome 탭: 확장 아이콘에서 연결"),NSMakeRect(18,20,324,64),11,NO);_browserLabel.maximumNumberOfLines=2;_browserLabel.lineBreakMode=NSLineBreakByWordWrapping;[settings.view addSubview:_browserLabel];
-    // Keep settings reachable on smaller displays as the optional hardware section grows.
-    NSView *settingsDocument=settings.view;for(NSView *child in settingsDocument.subviews){NSRect frame=child.frame;frame.origin.y+=92;child.frame=frame;}settingsDocument.frame=NSMakeRect(0,0,400,1012);
-    _transportMenu=[[TXPopup alloc] initWithFrame:NSMakeRect(18,800,200,28) pullsDown:NO];for(NSArray *v in @[@[TXL(@"MIDI 자동"),@"auto"],@[@"USB MIDI",@"usb"],@[@"Bluetooth MIDI",@"ble"]]){[_transportMenu addItemWithTitle:v[0]];_transportMenu.lastItem.representedObject=v[1];}for(NSMenuItem *item in _transportMenu.itemArray)if([item.representedObject isEqual:_midi.transport])[_transportMenu selectItem:item];_transportMenu.target=self;_transportMenu.action=@selector(transportChanged:);[settingsDocument addSubview:_transportMenu];
-    [settingsDocument addSubview:Button(TXL(@"Bluetooth 연결…"),NSMakeRect(230,800,152,28),self,@selector(showBluetooth:))];
-    [settingsDocument addSubview:Button(TXL(@"EQ 초기화"),NSMakeRect(18,842,364,29),self,@selector(resetEQ:))];
-    _usbMetersButton=[NSButton checkboxWithTitle:TXL(@"TX-6 USB 채널 미터") target:self action:@selector(usbMetersChanged:)];_usbMetersButton.frame=NSMakeRect(18,65,364,24);_usbMetersButton.state=_usbMeters?NSControlStateValueOn:NSControlStateValueOff;[settingsDocument addSubview:_usbMetersButton];
-    _usbMetersStatus=Label(@"",NSMakeRect(18,10,364,50),10,NO);_usbMetersStatus.maximumNumberOfLines=3;_usbMetersStatus.lineBreakMode=NSLineBreakByWordWrapping;[settingsDocument addSubview:_usbMetersStatus];
-    [settingsDocument addSubview:Button(TXL(@"레벨…"),NSMakeRect(18,884,364,29),self,@selector(showLevels:))];
-    _syncButton=[NSButton checkboxWithTitle:TXL(@"영상 싱크 보정") target:self action:@selector(syncCompensationChanged:)];_syncButton.frame=NSMakeRect(18,968,364,24);_syncButton.state=_syncCompensation?NSControlStateValueOn:NSControlStateValueOff;_syncButton.toolTip=TXL(@"원래 앱 출력과 믹서 출력의 장치 지연 차이를 추정해 소리가 먼저 나오는 경로를 보정합니다. 출력 장치는 바꾸지 않습니다.");_syncButton.accessibilityHelp=_syncButton.toolTip;[settingsDocument addSubview:_syncButton];
-    _syncLabel=Label(@"",NSMakeRect(18,920,364,42),10,NO);_syncLabel.maximumNumberOfLines=2;_syncLabel.lineBreakMode=NSLineBreakByWordWrapping;[settingsDocument addSubview:_syncLabel];
-    CGFloat settingsHeight=MIN(1012,MAX(400,NSScreen.mainScreen.visibleFrame.size.height-100));NSScrollView *settingsScroll=[[NSScrollView alloc] initWithFrame:NSMakeRect(0,0,400,settingsHeight)];settingsScroll.hasVerticalScroller=YES;settingsScroll.autohidesScrollers=YES;settingsScroll.drawsBackground=NO;settingsScroll.documentView=settingsDocument;settings.view=settingsScroll;[settingsDocument scrollPoint:NSMakePoint(0,1012-settingsHeight)];
-    _settingsPopover=[NSPopover new];_settingsPopover.behavior=NSPopoverBehaviorSemitransient;_settingsPopover.delegate=self;_settingsPopover.contentViewController=settings;
+    [self buildSettings];
     [_canvas addSubview:Button(TXL(@"SETUP / 설정"),NSMakeRect(865,653,167,29),self,@selector(showSettings:))];
     _remainderLabel=Label(TXL(@"미지정 앱도 MASTER 적용"),NSMakeRect(865,748,167,22),10,NO);[_canvas addSubview:_remainderLabel];
     NSMenu *main=[NSMenu new],*appMenu=[NSMenu new];NSMenuItem *appItem=[NSMenuItem new];appItem.submenu=appMenu;[main addItem:appItem];[appMenu addItemWithTitle:TXL(@"TX · MAC 정보") action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];[appMenu addItem:NSMenuItem.separatorItem];NSMenuItem *preferences=[appMenu addItemWithTitle:TXL(@"설정…") action:@selector(openPreferences:) keyEquivalent:@","];preferences.target=self;NSMenuItem *guide=[appMenu addItemWithTitle:TXL(@"시작 안내 및 권한…") action:@selector(showSetup:) keyEquivalent:@""];guide.target=self;[appMenu addItem:NSMenuItem.separatorItem];[appMenu addItemWithTitle:TXL(@"TX · MAC 숨기기") action:@selector(hide:) keyEquivalent:@"h"];[appMenu addItemWithTitle:TXL(@"TX · MAC 종료") action:@selector(terminate:) keyEquivalent:@"q"];NSApp.mainMenu=main;
 }
+- (void)buildSettings {
+    _settingsLayoutSignature=nil;_settingsRoot=[[TXSettingsView alloc] initWithFrame:NSMakeRect(0,0,420,240)];_settingsRoot.wantsLayer=YES;_settingsRoot.layer.backgroundColor=Color(0xD8D9D4).CGColor;_settingsBody=[[TXSettingsView alloc] initWithFrame:NSZeroRect];[_settingsRoot addSubview:_settingsBody];
+    _settingsTabs=[[TXSettingsTabs alloc] initWithFrame:NSMakeRect(18,16,384,32)];_settingsTabs.segmentCount=3;_settingsTabs.segmentDistribution=NSSegmentDistributionFillEqually;_settingsTabs.trackingMode=NSSegmentSwitchTrackingSelectOne;for(NSInteger i=0;i<3;i++){[_settingsTabs setLabel:@[TXL(@"일반"),TXL(@"오디오"),@"TX-6"][i] forSegment:i];[_settingsTabs setWidth:128 forSegment:i];}_settingsTabs.selectedSegment=MAX(0,MIN(2,_settingsTab));_settingsTabs.target=self;_settingsTabs.action=@selector(settingsTabChanged:);_settingsTabs.accessibilityLabel=TXL(@"SETUP / 설정");[_settingsRoot addSubview:_settingsTabs];_settingsRoot.accessibilityChildren=@[_settingsTabs,_settingsBody];
+    _settingsLanguageLabel=Label(TXL(@"언어"),NSZeroRect,12,YES);_languageMenu=[[TXPopup alloc] initWithFrame:NSZeroRect pullsDown:NO];_languageMenu.target=self;_languageMenu.action=@selector(languageChanged:);_languageMenu.accessibilityLabel=TXL(@"언어");for(NSArray *entry in @[@[TXL(@"시스템 설정"),@"system"],@[@"English",@"en"],@[@"한국어",@"ko"],@[@"日本語",@"ja"]]){[_languageMenu addItemWithTitle:entry[0]];_languageMenu.lastItem.representedObject=entry[1];if([entry[1] isEqual:TXLanguageCode()])[_languageMenu selectItem:_languageMenu.lastItem];}
+    _autoStartButton=[NSButton checkboxWithTitle:TXL(@"믹서 자동 시작 및 연결 복구") target:self action:@selector(autoStartChanged:)];_autoStartButton.state=_autoStart?NSControlStateValueOn:NSControlStateValueOff;_hudButton=[NSButton checkboxWithTitle:TXL(@"조절 시 상태 표시") target:self action:@selector(settingsChanged:)];_hudButton.state=_hudEnabled?NSControlStateValueOn:NSControlStateValueOff;_settingsGuideButton=Button(TXL(@"시작 안내 및 권한…"),NSZeroRect,self,@selector(showSetup:));
+    _autoButton=[NSButton checkboxWithTitle:TXL(@"자동 앱 매칭") target:self action:@selector(autoChanged:)];_autoButton.state=_autoAssign?NSControlStateValueOn:NSControlStateValueOff;_autoButton.toolTip=TXL(@"재생 앱을 빈 채널에 배정합니다. 일시정지해도 채널과 물리 음량·EQ·음소거는 고정됩니다. 수동 지정하면 자동 매칭이 꺼집니다.");
+    _browserTabsButton=[NSButton checkboxWithTitle:TXL(@"Chrome 탭별 채널 사용") target:self action:@selector(browserModeChanged:)];_browserTabsButton.state=_browserTabMode?NSControlStateValueOn:NSControlStateValueOff;_browserTabsButton.toolTip=TXL(@"기본은 Chrome 전체 한 채널입니다. 켜면 개별 탭만 표시합니다. 탭별 음량·EQ는 각 탭에서 ⌘⇧6 연결이 필요합니다.");_browserLabel=Label(@"",NSZeroRect,11,NO);
+    _syncButton=[NSButton checkboxWithTitle:TXL(@"영상 싱크 보정") target:self action:@selector(syncCompensationChanged:)];_syncButton.state=_syncCompensation?NSControlStateValueOn:NSControlStateValueOff;_syncButton.toolTip=TXL(@"원래 앱 출력과 믹서 출력의 장치 지연 차이를 추정해 소리가 먼저 나오는 경로를 보정합니다. 출력 장치는 바꾸지 않습니다.");_syncLabel=Label(@"",NSZeroRect,11,NO);_settingsLevelsButton=Button(TXL(@"레벨…"),NSZeroRect,self,@selector(showLevels:));_settingsEQButton=Button(TXL(@"EQ 초기화"),NSZeroRect,self,@selector(resetEQ:));
+    _transportMenu=[[TXPopup alloc] initWithFrame:NSZeroRect pullsDown:NO];for(NSArray *v in @[@[TXL(@"MIDI 자동"),@"auto"],@[@"USB MIDI",@"usb"],@[@"Bluetooth MIDI",@"ble"]]){[_transportMenu addItemWithTitle:v[0]];_transportMenu.lastItem.representedObject=v[1];if([v[1] isEqual:_midi.transport])[_transportMenu selectItem:_transportMenu.lastItem];}_transportMenu.target=self;_transportMenu.action=@selector(transportChanged:);_transportMenu.accessibilityLabel=TXL(@"MIDI 자동");_settingsBluetoothButton=Button(TXL(@"Bluetooth 연결…"),NSZeroRect,self,@selector(showBluetooth:));
+    _deviceContextLabel=Label(@"",NSZeroRect,11,NO);_resumeDeviceButton=Button(TXL(@"기기 홈 화면 확인 · TX-6 제어 재개"),NSZeroRect,self,@selector(resumeDeviceControls:));_pickupButton=[NSButton checkboxWithTitle:TXL(@"하드웨어 픽업") target:self action:@selector(settingsChanged:)];_pickupButton.state=_pickup?NSControlStateValueOn:NSControlStateValueOff;_pickupButton.toolTip=TXL(@"기본은 꺼짐이며 페이더와 노브가 즉시 반응합니다. 켜면 현재 맥 값에 맞출 때까지 기다리는 소프트 픽업을 사용합니다.");_invertButton=[NSButton checkboxWithTitle:TXL(@"페이더 방향 반전") target:self action:@selector(settingsChanged:)];_invertButton.state=_invert?NSControlStateValueOn:NSControlStateValueOff;
+    _usbMetersButton=[NSButton checkboxWithTitle:TXL(@"TX-6 USB 채널 미터") target:self action:@selector(usbMetersChanged:)];_usbMetersButton.state=_usbMeters?NSControlStateValueOn:NSControlStateValueOff;_usbMetersStatus=Label(@"",NSZeroRect,11,NO);
+    _settingsCalibrationLabel=Label(TXL(@"기기 숫자 맞춤"),NSZeroRect,12,YES);_calibrationInput=[[NSTextField alloc] initWithFrame:NSZeroRect];_calibrationInput.placeholderString=@"0–99";_calibrationInput.font=Mono(13,NSFontWeightMedium);_calibrationInput.alignment=NSTextAlignmentCenter;_calibrationInput.target=self;_calibrationInput.action=@selector(calibrateMaster:);_calibrationInput.accessibilityLabel=TXL(@"TX-6 현재 메인 숫자 0부터 99");_settingsCalibrationButton=Button(TXL(@"맞춤"),NSZeroRect,self,@selector(calibrateMaster:));_settingsCalibrationNote=Label(TXL(@"한 번만 적용 · 자동 동기화 아님"),NSZeroRect,11,NO);NSString *calibrationHelp=TXL(@"입력한 숫자를 맥 전체 음량(0~99)으로 설정합니다.\n기기 자동 조회·상시 동기화 기능은 아닙니다.");_calibrationInput.toolTip=calibrationHelp;_calibrationInput.accessibilityHelp=calibrationHelp;_settingsCalibrationButton.toolTip=calibrationHelp;_settingsCalibrationButton.accessibilityHelp=calibrationHelp;
+    _settingsPages=@[@[_settingsLanguageLabel,_languageMenu,_autoStartButton,_hudButton,_settingsGuideButton],@[_autoButton,_browserTabsButton,_browserLabel,_syncButton,_syncLabel,_settingsLevelsButton,_settingsEQButton],@[_transportMenu,_settingsBluetoothButton,_deviceContextLabel,_resumeDeviceButton,_pickupButton,_invertButton,_usbMetersButton,_usbMetersStatus,_settingsCalibrationLabel,_calibrationInput,_settingsCalibrationButton,_settingsCalibrationNote]];
+    for(NSArray *page in _settingsPages)for(NSView *view in page){if([view isKindOfClass:NSControl.class]&&![view isKindOfClass:NSTextField.class])((NSControl*)view).font=[NSFont systemFontOfSize:12];if([view isKindOfClass:NSTextField.class]){NSTextField *label=(NSTextField*)view;if(label!=_calibrationInput){label.maximumNumberOfLines=2;label.lineBreakMode=NSLineBreakByWordWrapping;label.cell.usesSingleLineMode=NO;label.cell.wraps=YES;label.cell.scrollable=NO;}}if(view.toolTip.length)view.accessibilityHelp=view.toolTip;[_settingsBody addSubview:view];}
+    NSViewController *settings=[NSViewController new];settings.view=_settingsRoot;_settingsPopover=[NSPopover new];_settingsPopover.behavior=NSPopoverBehaviorSemitransient;_settingsPopover.delegate=self;_settingsPopover.contentViewController=settings;[self layoutSettings];
+}
+- (void)layoutSettings {
+    if(!_settingsRoot)return;NSInteger tab=MAX(0,MIN(2,_settingsTab));BOOL resume=_midi.sources.count&&(_deviceContext.suspended||_deviceContext.shiftDown);NSUInteger enabled=0;for(NSUInteger i=0;i<_settingsPages[tab].count;i++){NSView *view=_settingsPages[tab][i];if([view isKindOfClass:NSControl.class]&&((NSControl*)view).enabled)enabled|=(1UL<<i);}NSString *signature=[NSString stringWithFormat:@"%ld|%lu|%.0f|%.0f|%d",(long)tab,(unsigned long)enabled,tab==1?TXSettingsStatusHeight(_browserLabel):tab==2?TXSettingsStatusHeight(_deviceContextLabel):0,tab==1?TXSettingsStatusHeight(_syncLabel):tab==2?TXSettingsStatusHeight(_usbMetersStatus):0,tab==2&&resume];if([_settingsLayoutSignature isEqual:signature])return;_settingsLayoutSignature=signature;_settingsTabs.selectedSegment=tab;for(NSInteger i=0;i<3;i++)for(NSView *view in _settingsPages[i])view.hidden=i!=tab;
+    CGFloat width=384,y=0;NSMutableArray<NSControl*> *focus=[NSMutableArray array];void (^place)(NSView*,CGFloat,CGFloat,CGFloat,CGFloat)=^(NSView *view,CGFloat x,CGFloat top,CGFloat w,CGFloat h){view.frame=NSMakeRect(x,top,w,h);if([view isKindOfClass:NSControl.class]&&(![view isKindOfClass:NSTextField.class]||view==self->_calibrationInput)&&!view.hidden&&((NSControl*)view).enabled)[focus addObject:(NSControl*)view];};
+    if(tab==0){place(_settingsLanguageLabel,0,6,100,22);place(_languageMenu,112,0,272,32);place(_autoStartButton,0,44,width,32);place(_hudButton,0,80,width,32);place(_settingsGuideButton,0,128,width,32);y=160;}
+    else if(tab==1){place(_autoButton,0,y,width,32);y+=44;place(_browserTabsButton,0,y,width,32);y+=34;CGFloat h=TXSettingsStatusHeight(_browserLabel);place(_browserLabel,0,y,width,h);y+=h+16;place(_syncButton,0,y,width,32);y+=34;h=TXSettingsStatusHeight(_syncLabel);place(_syncLabel,0,y,width,h);y+=h+20;place(_settingsLevelsButton,0,y,186,32);place(_settingsEQButton,198,y,186,32);y+=32;}
+    else{place(_transportMenu,0,y,218,32);place(_settingsBluetoothButton,230,y,154,32);y+=44;CGFloat h=TXSettingsStatusHeight(_deviceContextLabel);place(_deviceContextLabel,0,y,width,h);y+=h;_resumeDeviceButton.hidden=!resume;if(resume){y+=6;place(_resumeDeviceButton,0,y,width,32);y+=32;}y+=16;place(_pickupButton,0,y,width,32);y+=36;place(_invertButton,0,y,width,32);y+=48;place(_usbMetersButton,0,y,width,32);y+=34;h=TXSettingsStatusHeight(_usbMetersStatus);place(_usbMetersStatus,0,y,width,h);y+=h+16;place(_settingsCalibrationLabel,0,y+6,152,22);place(_calibrationInput,164,y,76,32);place(_settingsCalibrationButton,252,y,132,32);y+=38;place(_settingsCalibrationNote,0,y,width,18);y+=18;}
+    CGFloat height=MIN(520,64+y+16);_settingsBody.frame=NSMakeRect(18,64,width,y);_settingsRoot.frame=NSMakeRect(0,0,420,height);if(!NSEqualSizes(_settingsPopover.contentSize,NSMakeSize(420,height)))_settingsPopover.contentSize=NSMakeSize(420,height);_settingsFocusViews=focus;NSView *previous=_settingsTabs;for(NSControl *control in focus){previous.nextKeyView=control;previous=control;}previous.nextKeyView=_settingsTabs;NSMutableArray *accessible=[NSMutableArray array];for(NSView *view in _settingsPages[tab])if(!view.hidden)[accessible addObject:view];_settingsBody.accessibilityChildren=accessible;_settingsTabs.needsDisplay=YES;if(_settingsPopover.shown&&_settingsTabs.window.firstResponder==_resumeDeviceButton&&_resumeDeviceButton.hidden)[_settingsTabs.window makeFirstResponder:_settingsTabs];
+}
+- (void)settingsTabChanged:(NSSegmentedControl*)sender {_settingsTab=MAX(0,MIN(2,sender.selectedSegment));[self layoutSettings];if(_settingsPopover.shown)[_settingsTabs.window makeFirstResponder:_settingsTabs];}
 - (NSView*)sliderViewForSlot:(NSInteger)slot band:(NSInteger)band {
     NSView *v=[[NSView alloc] initWithFrame:NSMakeRect(0,0,280,38)];NSSlider *slider=band<0?[[TXVolumeSlider alloc] initWithFrame:NSMakeRect(15,8,205,22)]:[NSSlider sliderWithValue:0 minValue:-18 maxValue:18 target:self action:@selector(menuSliderChanged:)];if(band<0){slider.minValue=0;slider.maxValue=1;slider.continuous=YES;slider.target=self;slider.action=@selector(menuSliderChanged:);}slider.frame=NSMakeRect(15,8,205,22);slider.tag=slot*10+band+1;
     slider.enabled=slot==6||[self canAdjustVolumeForSlot:slot];if(!slider.enabled)slider.toolTip=TXL(@"음소거 가능 · 음량/EQ는 Chrome 탭에서 ⌘⇧6으로 연결");slider.doubleValue=slot==6?atomic_load(&_audio.state->master):(band<0?atomic_load(&_audio.state->gain[slot]):atomic_load(&_audio.state->eq[slot][band]));[v addSubview:slider];
@@ -1457,6 +1493,7 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
     _resumeDeviceButton.enabled=_midi.sources.count&&(_deviceContext.suspended||_deviceContext.shiftDown);_deviceContextLabel.stringValue=!_midi.sources.count?TXL(@"MIDI 연결 대기"):(_deviceContext.suspended||_deviceContext.shiftDown)?(_deviceContext.reason?TXL(@"기기 메뉴 조작 중 · 맥 제어 일시정지\nSHIFT를 단독으로 눌렀다 떼면 홈 제어 재개"):TXL(@"기기 홈 화면 확인 필요 · 맥 제어 일시정지\nSHIFT를 단독으로 눌렀다 떼면 홈 제어 재개")):TXL(@"TX-6 홈 화면 제어 중\n메뉴 진입 신호가 오면 맥 조절을 보호합니다.");
     _syncButton.enabled=!_halBusy&&!_sceneApplying&&!_sceneStopping;
     _syncLabel.stringValue=!_syncCompensation?TXL(@"보정 꺼짐 · 원래 믹서 지연으로 재생"):[self syncStatusText];
+    NSTextField *statuses[]={_browserLabel,_syncLabel,_deviceContextLabel,_usbMetersStatus};for(int i=0;i<4;i++){NSTextField *status=statuses[i];NSString *help=status==_usbMetersStatus&&_usbMeterError.length?[status.stringValue stringByAppendingFormat:@"\n%@",_usbMeterError]:status.stringValue;status.toolTip=help;status.accessibilityHelp=help;}[self layoutSettings];
     _statusItem.button.toolTip=[NSString stringWithFormat:@"TX · MAC · %@ · %@",_audioReady?TXL(@"실행"):TXL(@"대기"),TXVolumeText(atomic_load(&s->master))];
 }
 - (void)writeStatusNow {_lastStatusWrite=nil;[self writeStatus];}
@@ -1506,8 +1543,8 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 - (void)deviceConnectionChanged {
     if(_midi.sources.count&&TXMayAutoStart(_autoStart,_audioStartConsent,_explicitStop,_sleeping)&&!_audioReady){_desiredRunning=YES;_retryAttempt=0;_retryExhausted=NO;_retryAt=nil;[self rebuildAudio];}
     BOOL connected=_midi.sources.count>0;
-    if(!connected||!_controllerConnected){_deviceContext=(TXDeviceContext){.suspended=YES};_canvas.message=connected?TXL(@"TX-6 화면을 확인해 주세요. SHIFT를 단독으로 누르고 떼면 홈 제어를 재개합니다."):TXL(@"MIDI 연결 대기");}
-    _controllerConnected=connected;[self updateStatus];[self writeStatus];
+    _deviceContext=(TXDeviceContext){.suspended=YES};_canvas.message=connected?TXL(@"TX-6 화면을 확인해 주세요. SHIFT를 단독으로 누르고 떼면 홈 제어를 재개합니다."):TXL(@"MIDI 연결 대기");
+    [self updateStatus];[self writeStatus];
 }
 - (void)primaryControl:(id)sender {[self toggleMixer:sender];}
 - (void)resumeDeviceControls:(id)sender {
@@ -1551,8 +1588,8 @@ static BOOL TXRunDeviceContextSelfCheck(void) {
 }
 - (void)showLevels:(id)sender {[_settingsPopover close];if(!_levelsController){_levelsController=[[TXLevelsController alloc] initWithRenderState:_audio.state];_levelsController.resetButton=Button(TXL(@"최고값 초기화"),NSZeroRect,nil,NULL);}[self updateLevels];[_levelsController showWindow:sender];}
 - (void)openPreferences:(id)sender {[self showWindow:nil];[self showSettings:_startButton];}
-- (void)showSettings:(NSButton*)sender {if(_settingsPopover.shown){[_settingsPopover close];return;}[NSApp activateIgnoringOtherApps:YES];[_window makeKeyAndOrderFront:nil];[_settingsPopover showRelativeToRect:sender.bounds ofView:sender preferredEdge:NSRectEdgeMinX];}
-- (void)popoverDidShow:(NSNotification*)notification {if(notification.object!=_settingsPopover)return;[_calibrationInput.window makeKeyWindow];[_calibrationInput.window makeFirstResponder:_calibrationInput];}
+- (void)showSettings:(NSButton*)sender {if(_settingsPopover.shown){[_settingsPopover close];return;}[self updateStatus];[NSApp activateIgnoringOtherApps:YES];[_window makeKeyAndOrderFront:nil];[_settingsPopover showRelativeToRect:sender.bounds ofView:sender preferredEdge:NSRectEdgeMinX];}
+- (void)popoverDidShow:(NSNotification*)notification {if(notification.object!=_settingsPopover)return;[self layoutSettings];_settingsTabs.window.autorecalculatesKeyViewLoop=NO;[_settingsTabs.window makeKeyWindow];[_settingsTabs.window makeFirstResponder:_settingsTabs];}
 - (void)soundKey:(id)sender {atomic_store(&_audio.state->masterMuted,false);[self showHUDForSlot:-1 message:TXL(@"전체 음소거 해제")];[self updateStatus];}
 - (void)muteKey:(id)sender {atomic_store(&_audio.state->masterMuted,true);[self showHUDForSlot:-1 message:TXL(@"전체 음소거")];[self updateStatus];}
 - (void)showBluetooth:(id)sender {if(!_bluetooth)_bluetooth=[CABTLEMIDIWindowController new];[_bluetooth showWindow:nil];[NSApp activateIgnoringOtherApps:YES];}
